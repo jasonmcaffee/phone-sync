@@ -506,3 +506,69 @@ async fn complete_rejects_content_that_fails_hash_check() {
         .send().await.unwrap();
     assert!(!resp.status().is_success(), "hash mismatch must not succeed");
 }
+
+/// The chunk endpoints build a staging path from the client's `sha256`, so a
+/// value carrying `..`, a separator or a drive letter must be refused outright —
+/// otherwise any signed-in caller picks where uploaded bytes land on disk.
+#[tokio::test]
+async fn chunk_endpoints_reject_a_path_traversing_hash() {
+    let (base, tmp) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let token = login(&base, &client).await;
+
+    let escape_target = tmp.path().join("pwned");
+    let hostile = [
+        "../../pwned",
+        r"..\..\pwned",
+        &format!("{}", escape_target.to_string_lossy()),
+        "not-hex-but-64-characters-long-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "abc",
+    ];
+
+    for sha in hostile {
+        let meta = serde_json::json!({ "sha256": sha, "chunk_index": 0 });
+        let form = reqwest::multipart::Form::new()
+            .text("metadata", meta.to_string())
+            .part("file", reqwest::multipart::Part::bytes(b"payload".to_vec()).file_name("part"));
+        let resp = client.post(format!("{base}/media/upload/chunk")).bearer_auth(&token).multipart(form).send().await.unwrap();
+        assert_eq!(resp.status(), 400, "chunk with sha256={sha:?} must be rejected");
+
+        let status = client.get(format!("{base}/media/upload/status/{sha}")).bearer_auth(&token).send().await.unwrap();
+        assert!(status.status() == 400 || status.status() == 404, "status with sha256={sha:?} got {}", status.status());
+
+        let complete = serde_json::json!({
+            "asset_id": "evil", "filename": "x.mp4", "content_type": "video/mp4",
+            "created_at": "2026-08-11T18:00:00Z", "media_type": "video", "sha256": sha, "total_chunks": 1,
+        });
+        let done = client.post(format!("{base}/media/upload/complete")).bearer_auth(&token).json(&complete).send().await.unwrap();
+        assert_eq!(done.status(), 400, "complete with sha256={sha:?} must be rejected");
+    }
+
+    assert!(!escape_target.exists(), "nothing may be written outside the chunk staging dir");
+    assert!(!tmp.path().join("pwned").exists());
+}
+
+/// A chunked upload whose chunks are missing must not leave a half-assembled
+/// temp file behind in the photo library.
+#[tokio::test]
+async fn failed_assembly_leaves_no_temp_file_in_the_library() {
+    let (base, tmp) = spawn_server().await;
+    let pictures = tmp.path().join("pictures");
+    let client = reqwest::Client::new();
+    let token = login(&base, &client).await;
+
+    // Declare four chunks but never upload any of them.
+    let complete = serde_json::json!({
+        "asset_id": "incomplete", "filename": "BIG.mp4", "content_type": "video/mp4",
+        "created_at": "2026-08-11T18:00:00Z", "media_type": "video",
+        "sha256": "b".repeat(64), "total_chunks": 4,
+    });
+    let resp = client.post(format!("{base}/media/upload/complete")).bearer_auth(&token).json(&complete).send().await.unwrap();
+    assert_eq!(resp.status(), 500, "assembly of missing chunks fails");
+
+    let folder = pictures.join("2026/202608-phone-sync");
+    let leftovers: Vec<String> = std::fs::read_dir(&folder)
+        .map(|entries| entries.map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect())
+        .unwrap_or_default();
+    assert!(leftovers.is_empty(), "no partial file left behind, found {leftovers:?}");
+}

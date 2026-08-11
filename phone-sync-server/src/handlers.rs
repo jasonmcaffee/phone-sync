@@ -106,10 +106,25 @@ pub async fn upload(State(state): State<AppState>, mut multipart: Multipart) -> 
 
 /// Reports which chunks the server already holds for a content hash, and whether
 /// the full content is already stored — lets the client resume/skip work.
-pub async fn upload_status(State(state): State<AppState>, Path(sha256): Path<String>) -> Json<ChunkStatusResponse> {
+pub async fn upload_status(State(state): State<AppState>, Path(sha256): Path<String>) -> Result<Json<ChunkStatusResponse>, ApiError> {
+    require_content_hash(&sha256)?;
     let stored = state.storage.is_content_stored(&sha256);
     let received = if stored { Vec::new() } else { state.storage.received_chunk_indices(&sha256) };
-    Json(ChunkStatusResponse { stored, received })
+    Ok(Json(ChunkStatusResponse { stored, received }))
+}
+
+/// Rejects a content hash that is not a plain 64-character hex sha256.
+///
+/// The chunk endpoints use this value to build the staging path, so anything
+/// containing `..`, a separator or a drive letter would let a signed-in caller
+/// choose where uploaded bytes land on disk. Validated at the edge as well as in
+/// storage so a malformed hash fails as a 400 rather than a 500.
+/// @param sha256 - the client-supplied content hash
+fn require_content_hash(sha256: &str) -> Result<(), ApiError> {
+    if crate::storage::is_valid_content_hash(sha256) {
+        return Ok(());
+    }
+    Err(ApiError::BadRequest("sha256 must be 64 hex characters".into()))
 }
 
 /// Accepts one chunk of a large upload (multipart: `metadata` {sha256,
@@ -141,6 +156,7 @@ pub async fn upload_chunk(State(state): State<AppState>, mut multipart: Multipar
 
     let meta = meta.ok_or_else(|| ApiError::BadRequest("missing metadata part".into()))?;
     let bytes = bytes.ok_or_else(|| ApiError::BadRequest("missing file part".into()))?;
+    require_content_hash(&meta.sha256)?;
     state.storage.write_chunk(&meta.sha256, meta.chunk_index, &bytes).map_err(ApiError::from)?;
     Ok(Json(ChunkAck { received: meta.chunk_index, ok: true }))
 }
@@ -148,6 +164,7 @@ pub async fn upload_chunk(State(state): State<AppState>, mut multipart: Multipar
 /// Finalizes a chunked upload: assembles and verifies the staged chunks into the
 /// stored file, filed by capture date like any other upload.
 pub async fn upload_complete(State(state): State<AppState>, Json(req): Json<CompleteRequest>) -> Result<(StatusCode, Json<UploadResponse>), ApiError> {
+    require_content_hash(&req.sha256)?;
     let (record, duplicate) = state
         .storage
         .assemble_and_store(&req.asset_id, &req.filename, &req.content_type, &req.media_type, &req.created_at, &req.sha256, req.total_chunks)

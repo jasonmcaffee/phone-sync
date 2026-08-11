@@ -165,14 +165,21 @@ impl Storage {
     /// Directory staging in-progress chunks for a given content hash. Lives
     /// under the data dir (not the media library) so partial uploads never
     /// pollute the photo tree.
-    fn chunk_dir(&self, sha256: &str) -> PathBuf {
-        self.data_dir.join("chunks").join(sha256)
+    ///
+    /// The hash is validated first: it is joined onto the data dir, and
+    /// `Path::join` with an absolute or `..`-bearing value silently escapes, so
+    /// an unvalidated value would let any signed-in caller choose where chunk
+    /// bytes land anywhere on the filesystem.
+    /// @param sha256 - the client-supplied content hash
+    fn chunk_dir(&self, sha256: &str) -> Result<PathBuf> {
+        ensure_valid_content_hash(sha256)?;
+        Ok(self.data_dir.join("chunks").join(sha256))
     }
 
     /// True if the full content for `sha256` is already stored on disk.
     /// @param sha256 - hex content hash
     pub fn is_content_stored(&self, sha256: &str) -> bool {
-        self.stored_copy_of(sha256).is_some()
+        is_valid_content_hash(sha256) && self.stored_copy_of(sha256).is_some()
     }
 
     /// Persists a single chunk of an in-progress chunked upload.
@@ -180,15 +187,19 @@ impl Storage {
     /// @param index - zero-based chunk index
     /// @param bytes - the chunk contents
     pub fn write_chunk(&self, sha256: &str, index: u32, bytes: &[u8]) -> Result<()> {
-        let path = self.chunk_dir(sha256).join(format!("{index}.part"));
+        let path = self.chunk_dir(sha256)?.join(format!("{index}.part"));
         write_atomic(&path, bytes).context("writing chunk")
     }
 
     /// Lists the chunk indices already received for `sha256`, ascending, so the
     /// client can resume an interrupted upload by sending only what's missing.
+    /// An invalid hash simply reports nothing received.
     /// @param sha256 - full-file content hash
     pub fn received_chunk_indices(&self, sha256: &str) -> Vec<u32> {
-        let mut indices: Vec<u32> = std::fs::read_dir(self.chunk_dir(sha256))
+        let Ok(dir) = self.chunk_dir(sha256) else {
+            return Vec::new();
+        };
+        let mut indices: Vec<u32> = std::fs::read_dir(dir)
             .into_iter()
             .flatten()
             .flatten()
@@ -213,13 +224,14 @@ impl Storage {
     /// @param expected_sha - hex sha256 the assembled bytes must match
     /// @param total_chunks - number of chunks that make up the file
     pub fn assemble_and_store(&self, asset_id: &str, filename: &str, content_type: &str, media_type: &str, created_at: &str, expected_sha: &str, total_chunks: u32) -> Result<(MediaRecord, bool)> {
+        let chunk_dir = self.chunk_dir(expected_sha)?;
         let _writing = self.write_lock.lock().unwrap();
 
         // Dedup: if this content is already on disk, just record it for this asset.
         if let Some(prior) = self.stored_copy_of(expected_sha) {
             let record = self.make_record(asset_id, expected_sha, filename, content_type, media_type, created_at, prior.rel_path, prior.storage_root, prior.size);
             let dup = self.index_record(&record)?;
-            let _ = std::fs::remove_dir_all(self.chunk_dir(expected_sha));
+            let _ = std::fs::remove_dir_all(&chunk_dir);
             return Ok((record, dup));
         }
 
@@ -231,32 +243,21 @@ impl Storage {
         let ticket = TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let tmp = dir.join(format!(".{}-{ticket}.assembling", std::process::id()));
 
-        let mut hasher = Sha256::new();
-        let mut size: u64 = 0;
-        {
-            let mut out = std::fs::File::create(&tmp).context("creating assembly temp")?;
-            for index in 0..total_chunks {
-                let chunk_path = self.chunk_dir(expected_sha).join(format!("{index}.part"));
-                let data = std::fs::read(&chunk_path).with_context(|| format!("missing chunk {index}"))?;
-                hasher.update(&data);
-                out.write_all(&data)?;
-                size += data.len() as u64;
+        // Any failure below must take the half-written temp file with it, or a
+        // stray `.assembling` file is left sitting in the photo library.
+        let size = match concatenate_chunks(&chunk_dir, total_chunks, expected_sha, &tmp) {
+            Ok(size) => size,
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
             }
-            out.flush()?;
-            out.sync_all()?;
-        }
-
-        let actual = hex::encode(hasher.finalize());
-        if actual != expected_sha {
-            let _ = std::fs::remove_file(&tmp);
-            anyhow::bail!("assembled sha256 does not match declared hash");
-        }
+        };
 
         let name = unique_filename(&dir, &safe_filename(filename, content_type), expected_sha);
         std::fs::rename(&tmp, dir.join(&name)).context("finalizing assembled file")?;
         let record = self.make_record(asset_id, expected_sha, filename, content_type, media_type, created_at, format!("{folder}/{name}"), StorageRoot::MediaRoot, size);
         let dup = self.index_record(&record)?;
-        let _ = std::fs::remove_dir_all(self.chunk_dir(expected_sha));
+        let _ = std::fs::remove_dir_all(&chunk_dir);
         Ok((record, dup))
     }
 
@@ -333,6 +334,50 @@ pub fn is_thumbnailable(content_type: &str, filename: &str) -> bool {
     [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff"]
         .iter()
         .any(|ext| name.ends_with(ext))
+}
+
+/// Streams chunks `0..total_chunks` into `destination`, one at a time so a
+/// multi-GB video is never held whole in memory, and verifies the combined
+/// content hashes to `expected_sha`. Returns the assembled byte count.
+/// @param chunk_dir - staging directory holding the `<index>.part` files
+/// @param total_chunks - number of chunks that make up the file
+/// @param expected_sha - hex sha256 the assembled bytes must match
+/// @param destination - temp file the assembled bytes are written to
+fn concatenate_chunks(chunk_dir: &Path, total_chunks: u32, expected_sha: &str, destination: &Path) -> Result<u64> {
+    let mut hasher = Sha256::new();
+    let mut size: u64 = 0;
+    {
+        let mut out = std::fs::File::create(destination).context("creating assembly temp")?;
+        for index in 0..total_chunks {
+            let data = std::fs::read(chunk_dir.join(format!("{index}.part")))
+                .with_context(|| format!("missing chunk {index}"))?;
+            hasher.update(&data);
+            out.write_all(&data)?;
+            size += data.len() as u64;
+        }
+        out.flush()?;
+        out.sync_all()?;
+    }
+    if hex::encode(hasher.finalize()) != expected_sha {
+        anyhow::bail!("assembled sha256 does not match declared hash");
+    }
+    Ok(size)
+}
+
+/// Reports whether a client-supplied content hash is a plain 64-character hex
+/// sha256. Values that fail this are never used to build a filesystem path.
+/// @param sha256 - the value the client sent
+pub fn is_valid_content_hash(sha256: &str) -> bool {
+    sha256.len() == 64 && sha256.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Rejects a content hash that could escape the staging directory.
+/// @param sha256 - the value the client sent
+fn ensure_valid_content_hash(sha256: &str) -> Result<()> {
+    if !is_valid_content_hash(sha256) {
+        anyhow::bail!("sha256 must be 64 hex characters");
+    }
+    Ok(())
 }
 
 /// Builds the `<year>/<yyyymm>-<suffix>` folder for a capture timestamp,
