@@ -248,7 +248,9 @@ function renderLightbox() {
   if (!item) return;
   const stage = $("lb-stage");
   stage.innerHTML = "";
-  $("lb-caption").textContent = `${item.filename} · ${(item.size / 1048576).toFixed(1)} MB`;
+  // rel_path shows which <year>/<yyyymm>-phone-sync folder the item was filed into.
+  const folder = item.rel_path ? ` · ${item.rel_path}` : "";
+  $("lb-caption").textContent = `${item.filename} · ${(item.size / 1048576).toFixed(1)} MB${folder}`;
 
   if (item.media_type === "video") {
     const v = document.createElement("video");

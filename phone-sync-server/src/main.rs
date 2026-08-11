@@ -16,7 +16,17 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cfg = config::load();
-    let storage = Storage::open(cfg.data_dir.clone())?;
+    let storage = Storage::open(
+        cfg.data_dir.clone(),
+        cfg.media_root.clone(),
+        cfg.media_folder_suffix.clone(),
+    )?;
+    tracing::info!(
+        "data dir {} | media root {} (filed as <year>/<yyyymm>-{})",
+        cfg.data_dir.display(),
+        cfg.media_root.display(),
+        cfg.media_folder_suffix
+    );
     let state = AppState {
         config: Arc::new(cfg),
         storage: Arc::new(storage),

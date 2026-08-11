@@ -18,13 +18,20 @@ async fn spawn_server() -> (String, tempfile::TempDir) {
     let config = Config {
         bind_addr: "127.0.0.1:0".into(),
         data_dir: tmp.path().to_path_buf(),
+        media_root: tmp.path().join("pictures"),
+        media_folder_suffix: "phone-sync".into(),
         username: "jason".into(),
         password_hash: auth::hash_password("modestMouse1!"),
         jwt_secret: "test-secret".into(),
         token_ttl_secs: 365 * 24 * 60 * 60,
         max_upload_bytes: 10 * 1024 * 1024,
     };
-    let storage = Storage::open(config.data_dir.clone()).unwrap();
+    let storage = Storage::open(
+        config.data_dir.clone(),
+        config.media_root.clone(),
+        config.media_folder_suffix.clone(),
+    )
+    .unwrap();
     let state = AppState {
         config: Arc::new(config),
         storage: Arc::new(storage),
@@ -54,13 +61,19 @@ async fn login(base: &str, client: &reqwest::Client) -> String {
 
 /// Builds a multipart upload form for a fake asset.
 fn upload_form(asset_id: &str, filename: &str, content_type: &str, media_type: &str, bytes: Vec<u8>) -> reqwest::multipart::Form {
+    upload_form_at(asset_id, filename, content_type, media_type, "2026-08-11T18:00:00Z", bytes)
+}
+
+/// Builds a multipart upload form with an explicit capture timestamp, so tests
+/// can assert which month folder an item is filed into.
+fn upload_form_at(asset_id: &str, filename: &str, content_type: &str, media_type: &str, created_at: &str, bytes: Vec<u8>) -> reqwest::multipart::Form {
     use sha2::{Digest, Sha256};
     let sha = hex::encode(Sha256::digest(&bytes));
     let meta = serde_json::json!({
         "asset_id": asset_id,
         "filename": filename,
         "content_type": content_type,
-        "created_at": "2026-08-11T00:00:00Z",
+        "created_at": created_at,
         "media_type": media_type,
         "sha256": sha,
     });
@@ -308,4 +321,99 @@ async fn upload_rejects_sha_mismatch() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn media_is_filed_into_year_and_month_folders() {
+    let (base, tmp) = spawn_server().await;
+    let pictures = tmp.path().join("pictures");
+    let client = reqwest::Client::new();
+    let token = login(&base, &client).await;
+
+    // Three captures across two years and three months.
+    let captures = [
+        ("aug", "IMG_0042.jpg", "2026-08-11T18:00:00Z", "2026/202608-phone-sync"),
+        ("jan", "IMG_0100.jpg", "2026-01-05T20:00:00Z", "2026/202601-phone-sync"),
+        ("dec", "MOV_0007.mov", "2025-12-25T20:00:00Z", "2025/202512-phone-sync"),
+    ];
+    for (asset, filename, created_at, expected_folder) in captures {
+        let form = upload_form_at(asset, filename, "image/jpeg", "photo", created_at, format!("bytes-for-{asset}").into_bytes());
+        let resp = client.post(format!("{base}/media/upload")).bearer_auth(&token).multipart(form).send().await.unwrap();
+        assert_eq!(resp.status(), 201, "{asset} upload");
+        let on_disk = pictures.join(expected_folder).join(filename);
+        assert!(on_disk.exists(), "expected {} to exist", on_disk.display());
+    }
+
+    // Nothing was written into the legacy content-addressed tree.
+    assert!(!tmp.path().join("media").exists(), "legacy media/ tree should not be used");
+
+    // The listing reports the on-disk location so the gallery can show it.
+    let list: Value = client.get(format!("{base}/api/media")).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
+    assert_eq!(list["count"], 3);
+    let paths: Vec<String> = list["items"].as_array().unwrap().iter().map(|i| i["rel_path"].as_str().unwrap().to_string()).collect();
+    assert!(paths.contains(&"2026/202608-phone-sync/IMG_0042.jpg".to_string()), "got {paths:?}");
+}
+
+#[tokio::test]
+async fn same_filename_different_content_does_not_overwrite() {
+    let (base, tmp) = spawn_server().await;
+    let pictures = tmp.path().join("pictures");
+    let client = reqwest::Client::new();
+    let token = login(&base, &client).await;
+
+    let first = upload_form_at("a", "IMG_0001.jpg", "image/jpeg", "photo", "2026-08-11T18:00:00Z", b"first-photo".to_vec());
+    client.post(format!("{base}/media/upload")).bearer_auth(&token).multipart(first).send().await.unwrap();
+    let second = upload_form_at("b", "IMG_0001.jpg", "image/jpeg", "photo", "2026-08-11T18:00:00Z", b"second-photo".to_vec());
+    let resp: Value = client.post(format!("{base}/media/upload")).bearer_auth(&token).multipart(second).send().await.unwrap().json().await.unwrap();
+    assert_eq!(resp["duplicate"], false);
+
+    let folder = pictures.join("2026/202608-phone-sync");
+    let names: Vec<String> = std::fs::read_dir(&folder).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
+    assert_eq!(names.len(), 2, "both photos kept, got {names:?}");
+    assert_eq!(std::fs::read(folder.join("IMG_0001.jpg")).unwrap(), b"first-photo", "original untouched");
+
+    // Both are fetchable and return their own bytes.
+    let list: Value = client.get(format!("{base}/api/media")).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
+    for item in list["items"].as_array().unwrap() {
+        let id = item["id"].as_str().unwrap();
+        let fetched = client.get(format!("{base}/media/{id}")).bearer_auth(&token).send().await.unwrap();
+        assert_eq!(fetched.status(), 200);
+    }
+}
+
+#[tokio::test]
+async fn identical_bytes_are_stored_once_on_disk() {
+    let (base, tmp) = spawn_server().await;
+    let pictures = tmp.path().join("pictures");
+    let client = reqwest::Client::new();
+    let token = login(&base, &client).await;
+
+    // The same image imported under two different asset ids / names.
+    for (asset, filename) in [("one", "IMG_9.jpg"), ("two", "IMG_9-copy.jpg")] {
+        let form = upload_form_at(asset, filename, "image/jpeg", "photo", "2026-08-11T18:00:00Z", b"identical-bytes".to_vec());
+        client.post(format!("{base}/media/upload")).bearer_auth(&token).multipart(form).send().await.unwrap();
+    }
+
+    let folder = pictures.join("2026/202608-phone-sync");
+    let names: Vec<String> = std::fs::read_dir(&folder).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
+    assert_eq!(names, vec!["IMG_9.jpg".to_string()], "de-duplicated by content");
+}
+
+#[tokio::test]
+async fn unparseable_capture_time_falls_back_to_today() {
+    let (base, tmp) = spawn_server().await;
+    let pictures = tmp.path().join("pictures");
+    let client = reqwest::Client::new();
+    let token = login(&base, &client).await;
+
+    let form = upload_form_at("no-date", "IMG_5.jpg", "image/jpeg", "photo", "", b"undated".to_vec());
+    let resp = client.post(format!("{base}/media/upload")).bearer_auth(&token).multipart(form).send().await.unwrap();
+    assert_eq!(resp.status(), 201);
+
+    let today = chrono::Local::now();
+    let expected = pictures
+        .join(today.format("%Y").to_string())
+        .join(format!("{}-phone-sync", today.format("%Y%m")))
+        .join("IMG_5.jpg");
+    assert!(expected.exists(), "expected {} to exist", expected.display());
 }

@@ -51,6 +51,22 @@ pub struct UploadResponse {
     pub duplicate: bool,
 }
 
+/// Which configured root a record's `rel_path` is relative to.
+///
+/// Records written before the date-organized layout live under
+/// `<data_dir>/media/<ab>/<sha>.<ext>`; everything written since lives under the
+/// configured media root (e.g. `E:\pictures`). Serde defaults to the legacy
+/// variant so an index written by an older build keeps resolving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageRoot {
+    /// Legacy content-addressed layout inside the data dir.
+    #[default]
+    DataDir,
+    /// Date-organized layout under the configured media root.
+    MediaRoot,
+}
+
 /// A persisted media record kept in the metadata index.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaRecord {
@@ -60,8 +76,12 @@ pub struct MediaRecord {
     pub content_type: String,
     pub media_type: String,
     pub created_at: String,
-    /// Relative path under the data dir where bytes are stored.
+    /// Path to the bytes, relative to the root named by `storage_root`,
+    /// e.g. `2026/202608-phone-sync/IMG_0001.HEIC`.
     pub rel_path: String,
+    /// Which configured root `rel_path` is relative to.
+    #[serde(default)]
+    pub storage_root: StorageRoot,
     pub size: u64,
     /// Server-side ingest time (unix seconds).
     pub ingested_at: i64,
@@ -85,6 +105,9 @@ pub struct MediaListItem {
     pub media_type: String,
     pub created_at: String,
     pub size: u64,
+    /// Where the bytes live on disk, relative to the media root — surfaced so
+    /// the gallery can show which month folder an item was filed into.
+    pub rel_path: String,
     /// True if the server can render an image thumbnail for this item.
     pub thumbnailable: bool,
 }

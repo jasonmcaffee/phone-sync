@@ -23,15 +23,49 @@ ipconfig getifaddr en0
 | Var | Default | Purpose |
 |---|---|---|
 | `PHONE_SYNC_BIND` | `0.0.0.0:8080` | Bind address |
-| `PHONE_SYNC_DATA_DIR` | `./data` | Where media + index are stored |
+| `PHONE_SYNC_DATA_DIR` | `./data` | Metadata index, thumbnail cache, generated JWT secret |
+| `PHONE_SYNC_MEDIA_ROOT` | `<data dir>/media` | Root of the date-organized photo/video tree |
+| `PHONE_SYNC_MEDIA_FOLDER_SUFFIX` | `phone-sync` | Suffix on each month folder (`202608-phone-sync`) |
 | `PHONE_SYNC_USER` | `jason` | Seeded username |
 | `PHONE_SYNC_PASSWORD_HASH` | (hash of `modestMouse1!`) | Argon2 PHC hash; **set in prod** |
-| `PHONE_SYNC_JWT_SECRET` | `dev-insecure-change-me` | HMAC secret; **set in prod** |
+| `PHONE_SYNC_JWT_SECRET` | generated + persisted | HMAC secret; see below |
 | `PHONE_SYNC_TOKEN_TTL_SECS` | `31536000` (1 year) | Token lifetime |
 | `PHONE_SYNC_MAX_UPLOAD_BYTES` | `2147483648` (2 GB) | Per-file upload cap |
 
 To generate a production password hash, run the server once and copy the login flow,
 or add a small helper; the dev default is fine for local use.
+
+**JWT secret.** With `PHONE_SYNC_JWT_SECRET` unset the server generates a random
+256-bit secret on first run and persists it to `<data dir>/jwt-secret`, so tokens
+survive restarts without a known constant being compiled into an internet-facing
+binary. Set the variable explicitly if you'd rather manage it yourself.
+
+## Where files are stored
+
+Media is filed by **capture date**, using the original filename, so the backup is
+a normal photo library you can browse in Explorer rather than a hash tree:
+
+```
+<media root>/2026/202608-phone-sync/IMG_0093.HEIC
+<media root>/2026/202608-phone-sync/IMG_0102.MOV
+<media root>/2025/202512-phone-sync/IMG_0044.HEIC
+<data dir>/index/manifest.json      # asset_id -> record metadata
+<data dir>/thumbs/<sha256>.jpg      # generated thumbnail cache
+<data dir>/jwt-secret               # generated signing secret
+```
+
+Details worth knowing:
+
+- The client sends the capture time as RFC-3339 in **UTC**; it is converted to the
+  server's local time before choosing the month, so a shot taken at 8pm on August
+  31st files under August rather than slipping into September.
+- An unparseable or missing capture time falls back to today's date.
+- Content is still de-duplicated by sha256 — re-uploading bytes that are already
+  stored reuses the existing file instead of writing a second copy.
+- Two *different* photos that share a filename in the same month both survive: the
+  second is written as `IMG_0001-<8 hex chars>.jpg`. Nothing is ever overwritten.
+- Records written by an older build (the `media/<ab>/<sha>.<ext>` layout inside the
+  data dir) keep resolving; the index records which root each item lives under.
 
 ## Web gallery
 
@@ -76,19 +110,28 @@ cargo test   # 6 integration tests covering auth, upload, dedup, manifest, fetch
 
 ## Production (Windows 11)
 
-Build a release binary and run it behind a reverse proxy terminating TLS for
-`phone.jasonmcaffee.com`:
+Build the release binary with `build-windows.cmd` — plain `cargo build --release`
+fails because `ring` (via `jsonwebtoken`) compiles C and needs the MSVC toolchain
+on `INCLUDE`/`LIB`, which the script sets up by calling `vcvars64.bat`:
 
 ```powershell
-cargo build --release
-$env:PHONE_SYNC_JWT_SECRET="<long-random-secret>"
-$env:PHONE_SYNC_DATA_DIR="D:\phone-sync-data"
-.\target\release\phone-sync-server.exe
+.\build-windows.cmd
 ```
 
-Data layout under the data dir:
+Then run it behind the reverse proxy that terminates TLS for
+`phone.jasonmcaffee.com`. On this box that is `..\start-phone-sync.bat`, launched
+by the Service Manager as the **Phone Sync** service on port **7071**:
 
-```
-media/<ab>/<sha256>.<ext>   # content-addressed bytes
-index/manifest.json         # asset_id -> record metadata
-```
+| | |
+|---|---|
+| Bind | `0.0.0.0:7071` |
+| Media root | `E:\pictures` (→ `E:\pictures\2026\202608-phone-sync\…`) |
+| Data dir | `E:\phone-sync-data` |
+| Public URL | `https://phone.jasonmcaffee.com` (Cloudflare → proxy on :80 → :7071) |
+
+One process serves the app API *and* the web gallery, so it is a single Service
+Manager entry. It is registered with `startOnBoot` in both the **Balanced** and
+**2 Comfy** profiles.
+
+Note that Cloudflare's proxied edge caps a single request body at 100 MB on the
+free plan, so a very large video will fail there before it reaches this server.

@@ -67,7 +67,21 @@ cd phone-sync-app && xcodebuild test -project PhoneSync.xcodeproj -scheme PhoneS
 
 ## Production (Windows 11)
 
-The backend is pure Rust and cross-compiles to Windows. Run it behind a TLS-terminating
-reverse proxy for `phone.jasonmcaffee.com`, set `PHONE_SYNC_JWT_SECRET` and
-`PHONE_SYNC_DATA_DIR`, then point the app's server URL at `https://phone.jasonmcaffee.com`.
-See [phone-sync-server/README.md](phone-sync-server/README.md) for details.
+The backend is pure Rust and cross-compiles to Windows. On the Windows box it runs as
+the **Phone Sync** Service Manager entry on port **7071**, launched by
+[`start-phone-sync.bat`](start-phone-sync.bat), behind the reverse proxy that terminates
+TLS for `phone.jasonmcaffee.com`. Point the app's server URL at
+`https://phone.jasonmcaffee.com`.
+
+Photos and videos are filed into the real photo library by capture date:
+
+```
+E:\pictures\2026\202608-phone-sync\IMG_0093.HEIC
+E:\pictures\2025\202512-phone-sync\IMG_0044.HEIC
+```
+
+Only the metadata index and the thumbnail cache live in the data dir
+(`E:\phone-sync-data`). Build with `phone-sync-server\build-windows.cmd` — it sets up
+the MSVC environment that `ring` needs. See
+[phone-sync-server/README.md](phone-sync-server/README.md) for the full configuration,
+storage layout and de-duplication rules.

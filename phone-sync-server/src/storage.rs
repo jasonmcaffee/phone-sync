@@ -1,8 +1,14 @@
 //! Filesystem-backed media storage with a JSON metadata index.
 //!
-//! Media bytes are content-addressed: the file path is derived from the
-//! sha256 of the content, so identical bytes are stored once (idempotency).
-//! A JSON index maps asset ids -> records and is persisted atomically.
+//! Uploads are filed into a date-organized tree under the configured media root
+//! — `<media_root>/<year>/<yyyymm>-<suffix>/<original filename>`, e.g.
+//! `E:\pictures\2026\202608-phone-sync\IMG_0001.HEIC` — so the backup lands
+//! directly in the same photo library layout everything else on this machine
+//! uses, rather than in an opaque hash tree.
+//!
+//! Content is still de-duplicated by sha256: re-uploading bytes that are already
+//! stored reuses the existing file instead of writing a second copy. A JSON
+//! index maps asset ids -> records and is persisted atomically.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -10,30 +16,46 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Local, NaiveDate, NaiveDateTime};
 use sha2::{Digest, Sha256};
 
-use crate::models::MediaRecord;
+use crate::models::{MediaRecord, StorageRoot};
 
-/// Owns the data directory and an in-memory index guarded by a mutex.
+/// Makes each atomic-write temp filename unique within the process.
+static TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Owns the storage roots and an in-memory index guarded by a mutex.
 pub struct Storage {
+    /// Holds the metadata index and the thumbnail cache.
     data_dir: PathBuf,
+    /// Root of the date-organized photo/video tree.
+    media_root: PathBuf,
+    /// Suffix appended to each month folder (`202608-phone-sync`).
+    folder_suffix: String,
+    /// Serializes the whole "is it already stored? / pick a free name / write"
+    /// sequence, so two concurrent uploads can neither pick the same filename
+    /// nor both write the same new content.
+    write_lock: Mutex<()>,
     /// asset_id -> record. Protected for concurrent uploads.
     index: Mutex<HashMap<String, MediaRecord>>,
 }
 
 impl Storage {
-    /// Opens (or initializes) storage rooted at `data_dir`, loading any
-    /// existing metadata index from disk.
-    pub fn open(data_dir: PathBuf) -> Result<Self> {
-        std::fs::create_dir_all(data_dir.join("media"))
-            .context("creating media dir")?;
-        std::fs::create_dir_all(data_dir.join("index"))
-            .context("creating index dir")?;
-        std::fs::create_dir_all(data_dir.join("thumbs"))
-            .context("creating thumbs dir")?;
+    /// Opens (or initializes) storage, creating the index/thumbnail dirs and the
+    /// media root, and loading any existing metadata index from disk.
+    /// @param data_dir - directory holding the index and thumbnail cache
+    /// @param media_root - root of the date-organized media tree
+    /// @param folder_suffix - suffix appended to each month folder name
+    pub fn open(data_dir: PathBuf, media_root: PathBuf, folder_suffix: String) -> Result<Self> {
+        std::fs::create_dir_all(&media_root).context("creating media root")?;
+        std::fs::create_dir_all(data_dir.join("index")).context("creating index dir")?;
+        std::fs::create_dir_all(data_dir.join("thumbs")).context("creating thumbs dir")?;
         let index = load_index(&data_dir).unwrap_or_default();
         Ok(Self {
             data_dir,
+            media_root,
+            folder_suffix,
+            write_lock: Mutex::new(()),
             index: Mutex::new(index),
         })
     }
@@ -82,26 +104,39 @@ impl Storage {
         Some(bytes)
     }
 
-    /// Resolves the absolute path of a record's bytes on disk.
+    /// Resolves the absolute path of a record's bytes on disk, honoring which
+    /// root the record was written under.
     pub fn absolute_path(&self, record: &MediaRecord) -> PathBuf {
-        self.data_dir.join(&record.rel_path)
+        match record.storage_root {
+            StorageRoot::MediaRoot => self.media_root.join(&record.rel_path),
+            StorageRoot::DataDir => self.data_dir.join(&record.rel_path),
+        }
     }
 
     /// Persists uploaded bytes idempotently.
     ///
-    /// Computes the sha256 of `bytes`, writes them to a content-addressed path
-    /// (atomically via temp file + rename) unless already present, records the
-    /// metadata keyed by `asset_id`, and returns (record, was_duplicate).
+    /// Content already on disk (matched by sha256) is reused rather than written
+    /// again; new content is filed into the month folder derived from the
+    /// capture time. Returns the resulting record and whether this upload was a
+    /// duplicate of one already recorded for the same asset.
+    /// @param asset_id - stable client-side identifier for the source asset
+    /// @param filename - original filename from the device
+    /// @param content_type - MIME type declared by the client
+    /// @param media_type - "photo" or "video"
+    /// @param created_at - ISO-8601 capture time from the device
+    /// @param bytes - the file contents
     pub fn store(&self, asset_id: &str, filename: &str, content_type: &str, media_type: &str, created_at: &str, bytes: &[u8]) -> Result<(MediaRecord, bool)> {
+        let _writing = self.write_lock.lock().unwrap();
         let sha256 = hex::encode(Sha256::digest(bytes));
-        let ext = extension_for(filename, content_type);
-        let rel_path = content_path(&sha256, &ext);
-        let abs_path = self.data_dir.join(&rel_path);
-
-        let file_existed = abs_path.exists();
-        if !file_existed {
-            write_atomic(&abs_path, bytes).context("writing media file")?;
-        }
+        let existing = self.stored_copy_of(&sha256);
+        let content_existed = existing.is_some();
+        let (rel_path, storage_root) = match existing {
+            Some(prior) => (prior.rel_path, prior.storage_root),
+            None => (
+                self.write_new_media(filename, content_type, created_at, &sha256, bytes)?,
+                StorageRoot::MediaRoot,
+            ),
+        };
 
         let record = MediaRecord {
             asset_id: asset_id.to_string(),
@@ -110,7 +145,8 @@ impl Storage {
             content_type: content_type.to_string(),
             media_type: media_type.to_string(),
             created_at: created_at.to_string(),
-            rel_path: rel_path.to_string_lossy().to_string(),
+            rel_path,
+            storage_root,
             size: bytes.len() as u64,
             ingested_at: chrono::Utc::now().timestamp(),
         };
@@ -120,10 +156,43 @@ impl Storage {
             let already_indexed = index.contains_key(asset_id);
             index.insert(asset_id.to_string(), record.clone());
             persist_index(&self.data_dir, &index).context("persisting index")?;
-            file_existed && already_indexed
+            content_existed && already_indexed
         };
 
         Ok((record, duplicate))
+    }
+
+    /// Finds an indexed record whose bytes are already on disk with the same
+    /// content hash, so a re-upload reuses that file instead of writing a copy.
+    /// @param sha256 - hex content hash of the incoming bytes
+    fn stored_copy_of(&self, sha256: &str) -> Option<MediaRecord> {
+        let candidate = self
+            .index
+            .lock()
+            .unwrap()
+            .values()
+            .find(|r| r.sha256 == sha256)
+            .cloned()?;
+        self.absolute_path(&candidate)
+            .exists()
+            .then_some(candidate)
+    }
+
+    /// Writes new content into `<media_root>/<year>/<yyyymm>-<suffix>/`, picking a
+    /// filename that does not collide with anything already there, and returns
+    /// the path relative to the media root.
+    /// @param filename - original filename from the device
+    /// @param content_type - MIME type, used when the name carries no extension
+    /// @param created_at - ISO-8601 capture time deciding the month folder
+    /// @param sha256 - content hash, used to disambiguate colliding names
+    /// @param bytes - the file contents
+    fn write_new_media(&self, filename: &str, content_type: &str, created_at: &str, sha256: &str, bytes: &[u8]) -> Result<String> {
+        let folder = month_folder(created_at, &self.folder_suffix);
+        let dir = self.media_root.join(&folder);
+        std::fs::create_dir_all(&dir).context("creating month folder")?;
+        let name = unique_filename(&dir, &safe_filename(filename, content_type), sha256);
+        write_atomic(&dir.join(&name), bytes).context("writing media file")?;
+        Ok(format!("{folder}/{name}"))
     }
 }
 
@@ -141,15 +210,84 @@ pub fn is_thumbnailable(content_type: &str, filename: &str) -> bool {
         .any(|ext| name.ends_with(ext))
 }
 
-/// Derives a two-level content-addressed relative path from a sha256 hash,
-/// e.g. `media/ab/abcd...ef.jpg`, to avoid huge flat directories.
-fn content_path(sha256: &str, ext: &str) -> PathBuf {
-    let prefix = &sha256[0..2];
-    if ext.is_empty() {
-        PathBuf::from("media").join(prefix).join(sha256)
-    } else {
-        PathBuf::from("media").join(prefix).join(format!("{sha256}.{ext}"))
+/// Builds the `<year>/<yyyymm>-<suffix>` folder for a capture timestamp,
+/// falling back to today when the timestamp is missing or unparseable.
+/// @param created_at - ISO-8601 capture time from the device
+/// @param suffix - suffix appended to the month folder name
+pub fn month_folder(created_at: &str, suffix: &str) -> String {
+    let date = capture_date(created_at).unwrap_or_else(|| Local::now().date_naive());
+    format!("{}/{}-{}", date.format("%Y"), date.format("%Y%m"), suffix)
+}
+
+/// Parses the client-supplied capture timestamp into a calendar date.
+///
+/// The iOS app sends RFC-3339 in UTC; that is converted to this machine's local
+/// time first, so a photo taken at 8pm on August 31st files under August rather
+/// than slipping into September with the UTC date. Plain `YYYY-MM-DDTHH:MM:SS`
+/// and bare `YYYY-MM-DD` are also accepted.
+/// @param created_at - the timestamp string to parse
+fn capture_date(created_at: &str) -> Option<NaiveDate> {
+    let trimmed = created_at.trim();
+    if trimmed.is_empty() {
+        return None;
     }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(trimmed) {
+        return Some(dt.with_timezone(&Local).date_naive());
+    }
+    for format in ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"] {
+        if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, format) {
+            return Some(dt.date());
+        }
+    }
+    let head: String = trimmed.chars().take(10).collect();
+    NaiveDate::parse_from_str(&head, "%Y-%m-%d").ok()
+}
+
+/// Reduces a client-supplied filename to a safe Windows-legal base name,
+/// appending an extension derived from the content type when it has none.
+/// @param filename - the raw filename from the client
+/// @param content_type - MIME type used to pick a fallback extension
+fn safe_filename(filename: &str, content_type: &str) -> String {
+    let base = filename.rsplit(['/', '\\']).next().unwrap_or_default();
+    let cleaned: String = base
+        .chars()
+        .filter(|c| !c.is_control() && !"<>:\"|?*".contains(*c))
+        .collect();
+    let cleaned = cleaned.trim_matches(|c: char| c == '.' || c.is_whitespace()).to_string();
+    if cleaned.is_empty() {
+        return format!("media.{}", extension_for("", content_type));
+    }
+    if Path::new(&cleaned).extension().is_none() {
+        return format!("{cleaned}.{}", extension_for("", content_type));
+    }
+    cleaned
+}
+
+/// Picks a filename that does not collide with an existing file in `dir`.
+/// Different phones (and different months of the same phone) both emit
+/// `IMG_0001.jpg`, so a colliding name is disambiguated with a short content
+/// hash rather than silently overwriting a photo.
+/// @param dir - the month folder the file will be written into
+/// @param name - the preferred filename
+/// @param sha256 - content hash used as the disambiguator
+fn unique_filename(dir: &Path, name: &str, sha256: &str) -> String {
+    if !dir.join(name).exists() {
+        return name.to_string();
+    }
+    let path = Path::new(name);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or_default();
+    for discriminator in [&sha256[..8], sha256] {
+        let candidate = if ext.is_empty() {
+            format!("{stem}-{discriminator}")
+        } else {
+            format!("{stem}-{discriminator}.{ext}")
+        };
+        if !dir.join(&candidate).exists() {
+            return candidate;
+        }
+    }
+    format!("{stem}-{}.{ext}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default())
 }
 
 /// Chooses a file extension from the filename, falling back to the content type.
@@ -167,12 +305,15 @@ fn extension_for(filename: &str, content_type: &str) -> String {
     }
 }
 
-/// Writes bytes atomically: to a temp file, flush+sync, then rename into place.
+/// Writes bytes atomically: to a uniquely-named temp file in the destination
+/// directory, flush+sync, then rename into place. The temp name carries a
+/// process-unique counter so two writes in the same folder never share one.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("tmp-upload");
+    let ticket = TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("{}-{ticket}.tmp-upload", std::process::id()));
     {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(bytes)?;

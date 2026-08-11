@@ -117,6 +117,7 @@ pub async fn list_media(State(state): State<AppState>) -> Result<Json<MediaListR
             media_type: r.media_type,
             created_at: r.created_at,
             size: r.size,
+            rel_path: r.rel_path,
             thumbnailable: is_thumbnailable(&r.content_type, ""),
         })
         .collect();
