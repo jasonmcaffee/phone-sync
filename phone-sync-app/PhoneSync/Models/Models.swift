@@ -4,9 +4,9 @@ import Foundation
 struct ServerConfig: Equatable {
     var baseURL: String
 
-    /// Default development server. Replace via Settings, or point at
-    /// https://phone.jasonmcaffee.com in production.
-    static let devDefault = ServerConfig(baseURL: "http://192.168.0.26:8080")
+    /// Default server the app points at on first launch. Editable via the
+    /// sign-in screen and Settings (e.g. a LAN `http://<ip>:8080` for local dev).
+    static let defaultServer = ServerConfig(baseURL: "https://phone.jasonmcaffee.com")
 }
 
 /// A signed-in session's bearer token and its expiry.

@@ -14,7 +14,7 @@ final class AppEnvironment: ObservableObject {
     /// Builds the object graph. The API client's base URL comes from AuthService
     /// (which loads the persisted server URL).
     init() {
-        let api = ApiClient(baseURLString: ServerConfig.devDefault.baseURL)
+        let api = ApiClient(baseURLString: ServerConfig.defaultServer.baseURL)
         let auth = AuthService(api: api)
         let photoService = PhotoLibraryService()
         let store = SyncStateStore()

@@ -25,7 +25,7 @@ final class AuthService: ObservableObject {
         }
 
         let overrideURL = env.environment["UITEST_SERVER_URL"]
-        let storedURL = overrideURL ?? KeychainService.get(Self.serverKey) ?? ServerConfig.devDefault.baseURL
+        let storedURL = overrideURL ?? KeychainService.get(Self.serverKey) ?? ServerConfig.defaultServer.baseURL
         self.serverConfig = ServerConfig(baseURL: storedURL)
         api.configure(baseURLString: storedURL)
 
