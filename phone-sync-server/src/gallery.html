@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Phone Sync — Library</title>
+<style>
+  :root {
+    --bg: #0d0f12; --panel: #16191f; --line: #262b33;
+    --text: #e8eaed; --muted: #9aa3af; --accent: #2f7bf6; --green: #34c759; --red: #ff453a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    position: sticky; top: 0; z-index: 5;
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 18px; background: rgba(13,15,18,.85);
+    backdrop-filter: blur(10px); border-bottom: 1px solid var(--line);
+  }
+  header h1 { font-size: 17px; margin: 0; font-weight: 600; }
+  header .count { color: var(--muted); font-size: 13px; }
+  header .spacer { flex: 1; }
+  button {
+    font: inherit; color: var(--text); background: var(--panel);
+    border: 1px solid var(--line); border-radius: 8px; padding: 7px 12px; cursor: pointer;
+  }
+  button:hover { border-color: #3a4150; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+
+  /* Grid */
+  #grid {
+    display: grid; gap: 3px; padding: 3px;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  }
+  .tile {
+    position: relative; aspect-ratio: 1; background: var(--panel);
+    overflow: hidden; cursor: pointer; border-radius: 2px;
+  }
+  .tile img, .tile video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .tile .fallback {
+    width: 100%; height: 100%; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 6px; color: var(--muted);
+    text-align: center; padding: 8px; font-size: 12px;
+  }
+  .tile .fallback .ext { font-weight: 700; color: var(--text); font-size: 15px; letter-spacing: .5px; }
+  .badge {
+    position: absolute; padding: 2px 6px; border-radius: 20px;
+    font-size: 11px; font-weight: 600; background: rgba(0,0,0,.55); color: #fff;
+  }
+  .badge.type { left: 6px; top: 6px; display: flex; align-items: center; gap: 4px; }
+  .tile .play {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    pointer-events: none;
+  }
+  .tile .play svg { width: 42px; height: 42px; filter: drop-shadow(0 1px 3px rgba(0,0,0,.6)); opacity: .95; }
+
+  /* Lightbox */
+  #lightbox {
+    position: fixed; inset: 0; z-index: 20; display: none;
+    align-items: center; justify-content: center; background: rgba(0,0,0,.92);
+  }
+  #lightbox.open { display: flex; }
+  #lightbox .stage {
+    max-width: 94vw; max-height: 88vh; display: flex; align-items: center; justify-content: center;
+  }
+  #lightbox img, #lightbox video { max-width: 94vw; max-height: 88vh; border-radius: 6px; }
+  #lightbox .lb-fallback { color: var(--muted); text-align: center; max-width: 420px; padding: 20px; }
+  #lightbox .lb-fallback a { color: var(--accent); }
+  .lb-btn {
+    position: absolute; top: 16px; background: rgba(30,33,40,.7);
+    border: 1px solid var(--line); width: 42px; height: 42px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center; font-size: 20px;
+  }
+  #lb-close { right: 16px; }
+  .lb-nav {
+    position: absolute; top: 50%; transform: translateY(-50%);
+    width: 48px; height: 48px; border-radius: 50%; font-size: 22px;
+    background: rgba(30,33,40,.6); border: 1px solid var(--line);
+    display: flex; align-items: center; justify-content: center;
+  }
+  #lb-prev { left: 16px; } #lb-next { right: 16px; }
+  .lb-caption {
+    position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%);
+    color: var(--muted); font-size: 13px; background: rgba(30,33,40,.6);
+    padding: 6px 12px; border-radius: 20px; max-width: 80vw; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis;
+  }
+
+  /* Login */
+  #login {
+    position: fixed; inset: 0; z-index: 30; display: flex;
+    align-items: center; justify-content: center; background: var(--bg);
+  }
+  #login .card {
+    width: min(360px, 90vw); background: var(--panel); border: 1px solid var(--line);
+    border-radius: 16px; padding: 28px; display: flex; flex-direction: column; gap: 12px;
+  }
+  #login h2 { margin: 0 0 4px; text-align: center; }
+  #login p { margin: 0 0 8px; text-align: center; color: var(--muted); font-size: 13px; }
+  #login input {
+    font: inherit; color: var(--text); background: #0f1216; border: 1px solid var(--line);
+    border-radius: 8px; padding: 11px 12px;
+  }
+  #login .err { color: var(--red); font-size: 13px; text-align: center; min-height: 16px; }
+  .empty { text-align: center; color: var(--muted); padding: 60px 20px; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Library</h1>
+    <span class="count" id="count"></span>
+    <span class="spacer"></span>
+    <button id="refresh">Refresh</button>
+    <button id="logout">Sign out</button>
+  </header>
+
+  <div id="grid"></div>
+  <div class="empty" id="empty" style="display:none">No media has been synced yet.</div>
+
+  <!-- Lightbox -->
+  <div id="lightbox">
+    <button class="lb-btn" id="lb-close" title="Close (Esc)">✕</button>
+    <button class="lb-nav" id="lb-prev" title="Previous (←)">‹</button>
+    <div class="stage" id="lb-stage"></div>
+    <button class="lb-nav" id="lb-next" title="Next (→)">›</button>
+    <div class="lb-caption" id="lb-caption"></div>
+  </div>
+
+  <!-- Login -->
+  <div id="login">
+    <form class="card" id="login-form">
+      <h2>Phone Sync</h2>
+      <p>Sign in to view your backed-up media.</p>
+      <input id="username" placeholder="Username" autocomplete="username" value="jason" />
+      <input id="password" type="password" placeholder="Password" autocomplete="current-password" />
+      <div class="err" id="login-err"></div>
+      <button class="primary" type="submit" id="login-btn">Sign In</button>
+    </form>
+  </div>
+
+<script>
+const TOKEN_KEY = "phonesync_token";
+let token = localStorage.getItem(TOKEN_KEY);
+let items = [];
+let current = -1;
+
+const $ = (id) => document.getElementById(id);
+
+/** Builds an authenticated media URL (token as query param for <img>/<video>). */
+function mediaURL(id, kind) {
+  const path = kind === "thumb" ? `/media/${id}/thumb` : `/media/${id}`;
+  return `${path}?token=${encodeURIComponent(token)}`;
+}
+
+/** Uppercased file extension for fallback tiles. */
+function ext(filename) {
+  const dot = filename.lastIndexOf(".");
+  return dot >= 0 ? filename.slice(dot + 1).toUpperCase() : "FILE";
+}
+
+/** Signs in against the backend and stores the returned token. */
+async function login(username, password) {
+  const res = await fetch("/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!res.ok) throw new Error("Invalid username or password.");
+  const data = await res.json();
+  token = data.token;
+  localStorage.setItem(TOKEN_KEY, token);
+}
+
+/** Clears the session and shows the login screen. */
+function logout() {
+  token = null;
+  localStorage.removeItem(TOKEN_KEY);
+  $("login").style.display = "flex";
+}
+
+/** Loads the media list and renders the grid. Handles auth failures. */
+async function loadLibrary() {
+  const res = await fetch("/api/media", { headers: { Authorization: `Bearer ${token}` } });
+  if (res.status === 401) { logout(); return; }
+  const data = await res.json();
+  items = data.items || [];
+  $("count").textContent = items.length ? `${items.length} items` : "";
+  $("empty").style.display = items.length ? "none" : "block";
+  renderGrid();
+}
+
+/** Renders all tiles into the grid. */
+function renderGrid() {
+  const grid = $("grid");
+  grid.innerHTML = "";
+  items.forEach((item, index) => grid.appendChild(makeTile(item, index)));
+}
+
+/** Creates a single grid tile for an item. */
+function makeTile(item, index) {
+  const tile = document.createElement("div");
+  tile.className = "tile";
+  tile.onclick = () => openLightbox(index);
+
+  if (item.media_type === "video") {
+    const v = document.createElement("video");
+    v.src = mediaURL(item.id); v.muted = true; v.playsInline = true; v.preload = "metadata";
+    tile.appendChild(v);
+    tile.insertAdjacentHTML("beforeend",
+      `<span class="badge type">▶ Video</span>
+       <span class="play"><svg viewBox="0 0 24 24" fill="white"><path d="M8 5v14l11-7z"/></svg></span>`);
+  } else if (item.thumbnailable) {
+    const img = document.createElement("img");
+    img.loading = "lazy"; img.src = mediaURL(item.id, "thumb");
+    img.onerror = () => { tile.innerHTML = fallbackHTML(item); };
+    tile.appendChild(img);
+  } else {
+    tile.innerHTML = fallbackHTML(item);
+  }
+  return tile;
+}
+
+/** Fallback markup for undecodable images (e.g. HEIC). */
+function fallbackHTML(item) {
+  return `<div class="fallback"><span class="ext">${ext(item.filename)}</span><span>${item.filename}</span></div>`;
+}
+
+/** Opens the maximized lightbox at the given item index. */
+function openLightbox(index) {
+  current = index;
+  renderLightbox();
+  $("lightbox").classList.add("open");
+}
+
+/** Closes the lightbox and stops any playback. */
+function closeLightbox() {
+  $("lightbox").classList.remove("open");
+  $("lb-stage").innerHTML = "";
+}
+
+/** Renders the current item (image or playable video) in the lightbox. */
+function renderLightbox() {
+  const item = items[current];
+  if (!item) return;
+  const stage = $("lb-stage");
+  stage.innerHTML = "";
+  $("lb-caption").textContent = `${item.filename} · ${(item.size / 1048576).toFixed(1)} MB`;
+
+  if (item.media_type === "video") {
+    const v = document.createElement("video");
+    v.src = mediaURL(item.id); v.controls = true; v.autoplay = true; v.playsInline = true;
+    stage.appendChild(v);
+  } else {
+    const img = document.createElement("img");
+    img.src = mediaURL(item.id);
+    img.onerror = () => {
+      stage.innerHTML =
+        `<div class="lb-fallback">Can't preview <b>${ext(item.filename)}</b> in this browser.<br>
+         <a href="${mediaURL(item.id)}" download="${item.filename}">Download ${item.filename}</a></div>`;
+    };
+    stage.appendChild(img);
+  }
+}
+
+/** Moves to the previous/next item in the lightbox. */
+function navigate(delta) {
+  if (current < 0) return;
+  current = (current + delta + items.length) % items.length;
+  renderLightbox();
+}
+
+// --- Event wiring ---
+$("login-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  $("login-err").textContent = "";
+  try {
+    await login($("username").value.trim(), $("password").value);
+    $("login").style.display = "none";
+    await loadLibrary();
+  } catch (err) {
+    $("login-err").textContent = err.message;
+  }
+});
+$("logout").onclick = logout;
+$("refresh").onclick = loadLibrary;
+$("lb-close").onclick = closeLightbox;
+$("lb-prev").onclick = () => navigate(-1);
+$("lb-next").onclick = () => navigate(1);
+$("lightbox").addEventListener("click", (e) => { if (e.target.id === "lightbox") closeLightbox(); });
+document.addEventListener("keydown", (e) => {
+  if (!$("lightbox").classList.contains("open")) return;
+  if (e.key === "Escape") closeLightbox();
+  else if (e.key === "ArrowLeft") navigate(-1);
+  else if (e.key === "ArrowRight") navigate(1);
+});
+
+// --- Bootstrap ---
+if (token) {
+  $("login").style.display = "none";
+  loadLibrary();
+}
+</script>
+</body>
+</html>
