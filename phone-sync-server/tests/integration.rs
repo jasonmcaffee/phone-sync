@@ -417,3 +417,92 @@ async fn unparseable_capture_time_falls_back_to_today() {
         .join("IMG_5.jpg");
     assert!(expected.exists(), "expected {} to exist", expected.display());
 }
+
+/// Sends one chunk of a chunked upload and returns the parsed ack JSON.
+async fn send_chunk(base: &str, client: &reqwest::Client, token: &str, sha: &str, index: u32, bytes: &[u8]) -> Value {
+    let meta = serde_json::json!({ "sha256": sha, "chunk_index": index });
+    let part = reqwest::multipart::Part::bytes(bytes.to_vec()).file_name("chunk");
+    let form = reqwest::multipart::Form::new()
+        .text("metadata", meta.to_string())
+        .part("file", part);
+    client
+        .post(format!("{base}/media/upload/chunk"))
+        .bearer_auth(token)
+        .multipart(form)
+        .send().await.unwrap()
+        .json().await.unwrap()
+}
+
+#[tokio::test]
+async fn chunked_upload_assembles_verifies_and_resumes() {
+    use sha2::{Digest, Sha256};
+    let (base, _tmp) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let token = login(&base, &client).await;
+
+    // A larger payload split into 3 chunks.
+    let content: Vec<u8> = (0..40_000u32).flat_map(|i| i.to_le_bytes()).collect(); // 160 KB
+    let sha = hex::encode(Sha256::digest(&content));
+    let chunk_size = 60_000usize;
+    let chunks: Vec<&[u8]> = content.chunks(chunk_size).collect();
+    let total = chunks.len() as u32;
+
+    // Status before anything: not stored, nothing received.
+    let st: Value = client.get(format!("{base}/media/upload/status/{sha}")).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
+    assert_eq!(st["stored"], false);
+    assert_eq!(st["received"].as_array().unwrap().len(), 0);
+
+    // Upload chunks 0 and 2 first (skip 1), simulating an interruption.
+    assert_eq!(send_chunk(&base, &client, &token, &sha, 0, chunks[0]).await["ok"], true);
+    assert_eq!(send_chunk(&base, &client, &token, &sha, 2, chunks[2]).await["ok"], true);
+
+    // Status now reports exactly the received indices, so the client can resume.
+    let st2: Value = client.get(format!("{base}/media/upload/status/{sha}")).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
+    let received: Vec<u64> = st2["received"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap()).collect();
+    assert_eq!(received, vec![0, 2]);
+
+    // Send the missing chunk, then finalize.
+    send_chunk(&base, &client, &token, &sha, 1, chunks[1]).await;
+    let complete: Value = client
+        .post(format!("{base}/media/upload/complete"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "asset_id": "big-video-1", "filename": "VID_9999.mov",
+            "content_type": "video/quicktime", "created_at": "2026-08-11T18:00:00Z",
+            "media_type": "video", "sha256": sha, "total_chunks": total,
+        }))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(complete["stored"], true);
+    assert_eq!(complete["id"].as_str().unwrap(), sha);
+
+    // The assembled bytes match the original exactly.
+    let got = client.get(format!("{base}/media/{sha}")).bearer_auth(&token).send().await.unwrap().bytes().await.unwrap();
+    assert_eq!(&got[..], &content[..]);
+
+    // Content is now marked stored (so a re-sync skips it entirely).
+    let st3: Value = client.get(format!("{base}/media/upload/status/{sha}")).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
+    assert_eq!(st3["stored"], true);
+}
+
+#[tokio::test]
+async fn complete_rejects_content_that_fails_hash_check() {
+    use sha2::{Digest, Sha256};
+    let (base, _tmp) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let token = login(&base, &client).await;
+
+    let content = b"the real bytes".to_vec();
+    let wrong_sha = hex::encode(Sha256::digest(b"different bytes"));
+    send_chunk(&base, &client, &token, &wrong_sha, 0, &content).await;
+
+    let resp = client
+        .post(format!("{base}/media/upload/complete"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "asset_id": "bad", "filename": "x.bin", "content_type": "application/octet-stream",
+            "created_at": "2026-08-11T18:00:00Z", "media_type": "video",
+            "sha256": wrong_sha, "total_chunks": 1,
+        }))
+        .send().await.unwrap();
+    assert!(!resp.status().is_success(), "hash mismatch must not succeed");
+}

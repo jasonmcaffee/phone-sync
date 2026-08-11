@@ -118,3 +118,41 @@ pub struct MediaListResponse {
     pub items: Vec<MediaListItem>,
     pub count: usize,
 }
+
+// MARK: - Chunked upload (large videos exceeding Cloudflare's 100 MB body cap)
+
+/// Metadata part of a chunk upload: which file (by full-content sha256) and
+/// which chunk index this payload carries.
+#[derive(Debug, Deserialize)]
+pub struct ChunkMetadata {
+    pub sha256: String,
+    pub chunk_index: u32,
+}
+
+/// Acknowledgement that a single chunk was persisted.
+#[derive(Debug, Serialize)]
+pub struct ChunkAck {
+    pub received: u32,
+    pub ok: bool,
+}
+
+/// Status of a chunked upload: whether the full content is already stored, and
+/// which chunk indices the server currently holds (so the client can resume
+/// without re-sending chunks it already delivered).
+#[derive(Debug, Serialize)]
+pub struct ChunkStatusResponse {
+    pub stored: bool,
+    pub received: Vec<u32>,
+}
+
+/// Finalize request: assemble the previously-uploaded chunks into the file.
+#[derive(Debug, Deserialize)]
+pub struct CompleteRequest {
+    pub asset_id: String,
+    pub filename: String,
+    pub content_type: String,
+    pub created_at: String,
+    pub media_type: String,
+    pub sha256: String,
+    pub total_chunks: u32,
+}

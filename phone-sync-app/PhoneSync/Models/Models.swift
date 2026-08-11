@@ -92,3 +92,55 @@ struct StoredSyncRecord: Codable {
     var serverId: String?
     var lastAttempt: Double?
 }
+
+// MARK: - Chunked upload
+
+/// Tunables for how large files are chunked. Cloudflare's proxied edge caps a
+/// single request body at 100 MB, so anything larger is uploaded in pieces.
+enum SyncTuning {
+    /// Max bytes per chunk (90 MB, safely under the 100 MB edge limit). In DEBUG
+    /// builds a `CHUNK_SIZE_OVERRIDE` env var can shrink this so the chunked
+    /// path can be exercised without a multi-GB file.
+    static var chunkSize: Int {
+        #if DEBUG
+        if let raw = ProcessInfo.processInfo.environment["CHUNK_SIZE_OVERRIDE"], let value = Int(raw) {
+            return value
+        }
+        #endif
+        return 90 * 1000 * 1000
+    }
+}
+
+/// Server's view of an in-progress chunked upload: whether the full content is
+/// already stored, and which chunk indices it already holds (for resume).
+struct ChunkStatusResponse: Decodable {
+    let stored: Bool
+    let received: [Int]
+}
+
+/// Acknowledgement that one chunk was stored.
+struct ChunkAck: Decodable {
+    let received: Int
+    let ok: Bool
+}
+
+/// Finalize request that tells the server to assemble the uploaded chunks.
+struct CompleteRequest: Encodable {
+    let assetId: String
+    let filename: String
+    let contentType: String
+    let createdAt: String
+    let mediaType: String
+    let sha256: String
+    let totalChunks: Int
+
+    enum CodingKeys: String, CodingKey {
+        case assetId = "asset_id"
+        case filename
+        case contentType = "content_type"
+        case createdAt = "created_at"
+        case mediaType = "media_type"
+        case sha256
+        case totalChunks = "total_chunks"
+    }
+}

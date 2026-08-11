@@ -93,7 +93,10 @@ server-side HEIC→JPEG transcoding (via libheif) is a future enhancement.
 | GET | `/health` | none | Liveness probe |
 | POST | `/auth/login` | none | `{username,password}` → `{token, expires_at}` (1-year JWT) |
 | GET | `/media/manifest` | token | `{asset_ids, count}` already stored |
-| POST | `/media/upload` | token | multipart `metadata`(JSON)+`file`(bytes) → `{id, sha256, stored, duplicate}` |
+| POST | `/media/upload` | token | multipart `metadata`(JSON)+`file`(bytes) → `{id, sha256, stored, duplicate}` (for files ≤90 MB) |
+| GET | `/media/upload/status/{sha256}` | token | `{stored, received[]}` — which chunks the server already has (resume) |
+| POST | `/media/upload/chunk` | token | multipart `metadata`{sha256,chunk_index}+`file`(chunk) → `{received, ok}` |
+| POST | `/media/upload/complete` | token | JSON {…, sha256, total_chunks} → assembles+verifies chunks → `{id, sha256, stored, duplicate}` |
 | GET | `/api/media` | token | `{items[], count}` — full listing for the gallery, newest first |
 | GET | `/media/{id}` | token | Stream stored bytes; supports `Range` requests (video seeking) |
 | GET | `/media/{id}/thumb` | token | Cached JPEG thumbnail (image formats only) |
@@ -132,6 +135,13 @@ by the Service Manager as the **Phone Sync** service on port **7071**:
 One process serves the app API *and* the web gallery, so it is a single Service
 Manager entry. It is registered with `startOnBoot` in both the **Balanced** and
 **2 Comfy** profiles.
+
+Large videos work around this with the chunked upload flow: the client splits
+anything over 90 MB into ≤90 MB chunks (`/media/upload/chunk`), then asks the
+server to assemble and verify them (`/media/upload/complete`). Chunks stage under
+`<data dir>/chunks/<sha256>/` and are streamed into the final file one at a time,
+so a multi-GB video is never held whole in memory; `/media/upload/status` lets an
+interrupted upload resume without re-sending chunks already received.
 
 Note that Cloudflare's proxied edge caps a single request body at 100 MB on the
 free plan, so a very large video will fail there before it reaches this server.

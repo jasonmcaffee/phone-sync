@@ -67,20 +67,26 @@ struct MediaCellView: View {
         .padding(4)
     }
 
-    /// The colored sync-state indicator.
+    /// The sync-state indicator. Synced items get a prominent green checkmark;
+    /// syncing/failed get their own glyphs; not-synced shows nothing (the
+    /// Unsynced filter is how you find those), keeping the grid clean.
+    @ViewBuilder
     private var syncBadge: some View {
-        Image(systemName: badgeSymbol)
-            .font(.system(size: 16))
-            .symbolRenderingMode(.palette)
-            .foregroundStyle(.white, badgeColor)
-            .background(Circle().fill(.black.opacity(0.25)).frame(width: 22, height: 22))
-            .accessibilityIdentifier("badge-\(state.rawValue)")
+        if let symbol = badgeSymbol {
+            Image(systemName: symbol)
+                .font(.system(size: 18, weight: .bold))
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(.white, badgeColor)
+                .background(Circle().fill(.white).frame(width: 15, height: 15))
+                .shadow(color: .black.opacity(0.35), radius: 1.5, y: 0.5)
+                .accessibilityIdentifier("badge-\(state.rawValue)")
+        }
     }
 
-    /// SF Symbol name for the current state.
-    private var badgeSymbol: String {
+    /// SF Symbol for the current state, or nil when no badge should show.
+    private var badgeSymbol: String? {
         switch state {
-        case .notSynced: return "icloud.slash.fill"
+        case .notSynced: return nil
         case .syncing: return "arrow.triangle.2.circlepath.circle.fill"
         case .synced: return "checkmark.circle.fill"
         case .failed: return "exclamationmark.circle.fill"

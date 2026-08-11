@@ -162,6 +162,131 @@ impl Storage {
         Ok((record, duplicate))
     }
 
+    /// Directory staging in-progress chunks for a given content hash. Lives
+    /// under the data dir (not the media library) so partial uploads never
+    /// pollute the photo tree.
+    fn chunk_dir(&self, sha256: &str) -> PathBuf {
+        self.data_dir.join("chunks").join(sha256)
+    }
+
+    /// True if the full content for `sha256` is already stored on disk.
+    /// @param sha256 - hex content hash
+    pub fn is_content_stored(&self, sha256: &str) -> bool {
+        self.stored_copy_of(sha256).is_some()
+    }
+
+    /// Persists a single chunk of an in-progress chunked upload.
+    /// @param sha256 - full-file content hash the chunk belongs to
+    /// @param index - zero-based chunk index
+    /// @param bytes - the chunk contents
+    pub fn write_chunk(&self, sha256: &str, index: u32, bytes: &[u8]) -> Result<()> {
+        let path = self.chunk_dir(sha256).join(format!("{index}.part"));
+        write_atomic(&path, bytes).context("writing chunk")
+    }
+
+    /// Lists the chunk indices already received for `sha256`, ascending, so the
+    /// client can resume an interrupted upload by sending only what's missing.
+    /// @param sha256 - full-file content hash
+    pub fn received_chunk_indices(&self, sha256: &str) -> Vec<u32> {
+        let mut indices: Vec<u32> = std::fs::read_dir(self.chunk_dir(sha256))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| {
+                entry.file_name().to_str()?.strip_suffix(".part")?.parse().ok()
+            })
+            .collect();
+        indices.sort_unstable();
+        indices
+    }
+
+    /// Assembles previously-uploaded chunks `0..total_chunks` into the final
+    /// file, verifying the combined content matches `expected_sha` before
+    /// committing. Content already stored is reused (dedup). Chunks are streamed
+    /// one at a time, so a multi-GB video is never held whole in memory. The
+    /// chunk staging directory is removed on success.
+    /// @param asset_id - stable client-side identifier for the source asset
+    /// @param filename - original filename from the device
+    /// @param content_type - MIME type declared by the client
+    /// @param media_type - "photo" or "video"
+    /// @param created_at - ISO-8601 capture time deciding the month folder
+    /// @param expected_sha - hex sha256 the assembled bytes must match
+    /// @param total_chunks - number of chunks that make up the file
+    pub fn assemble_and_store(&self, asset_id: &str, filename: &str, content_type: &str, media_type: &str, created_at: &str, expected_sha: &str, total_chunks: u32) -> Result<(MediaRecord, bool)> {
+        let _writing = self.write_lock.lock().unwrap();
+
+        // Dedup: if this content is already on disk, just record it for this asset.
+        if let Some(prior) = self.stored_copy_of(expected_sha) {
+            let record = self.make_record(asset_id, expected_sha, filename, content_type, media_type, created_at, prior.rel_path, prior.storage_root, prior.size);
+            let dup = self.index_record(&record)?;
+            let _ = std::fs::remove_dir_all(self.chunk_dir(expected_sha));
+            return Ok((record, dup));
+        }
+
+        // Assemble into a temp file in the destination month folder, hashing as
+        // we go so we can reject a corrupt/incomplete upload before committing.
+        let folder = month_folder(created_at, &self.folder_suffix);
+        let dir = self.media_root.join(&folder);
+        std::fs::create_dir_all(&dir).context("creating month folder")?;
+        let ticket = TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = dir.join(format!(".{}-{ticket}.assembling", std::process::id()));
+
+        let mut hasher = Sha256::new();
+        let mut size: u64 = 0;
+        {
+            let mut out = std::fs::File::create(&tmp).context("creating assembly temp")?;
+            for index in 0..total_chunks {
+                let chunk_path = self.chunk_dir(expected_sha).join(format!("{index}.part"));
+                let data = std::fs::read(&chunk_path).with_context(|| format!("missing chunk {index}"))?;
+                hasher.update(&data);
+                out.write_all(&data)?;
+                size += data.len() as u64;
+            }
+            out.flush()?;
+            out.sync_all()?;
+        }
+
+        let actual = hex::encode(hasher.finalize());
+        if actual != expected_sha {
+            let _ = std::fs::remove_file(&tmp);
+            anyhow::bail!("assembled sha256 does not match declared hash");
+        }
+
+        let name = unique_filename(&dir, &safe_filename(filename, content_type), expected_sha);
+        std::fs::rename(&tmp, dir.join(&name)).context("finalizing assembled file")?;
+        let record = self.make_record(asset_id, expected_sha, filename, content_type, media_type, created_at, format!("{folder}/{name}"), StorageRoot::MediaRoot, size);
+        let dup = self.index_record(&record)?;
+        let _ = std::fs::remove_dir_all(self.chunk_dir(expected_sha));
+        Ok((record, dup))
+    }
+
+    /// Builds a MediaRecord from its parts (shared by store paths).
+    #[allow(clippy::too_many_arguments)]
+    fn make_record(&self, asset_id: &str, sha256: &str, filename: &str, content_type: &str, media_type: &str, created_at: &str, rel_path: String, storage_root: StorageRoot, size: u64) -> MediaRecord {
+        MediaRecord {
+            asset_id: asset_id.to_string(),
+            sha256: sha256.to_string(),
+            filename: filename.to_string(),
+            content_type: content_type.to_string(),
+            media_type: media_type.to_string(),
+            created_at: created_at.to_string(),
+            rel_path,
+            storage_root,
+            size,
+            ingested_at: chrono::Utc::now().timestamp(),
+        }
+    }
+
+    /// Inserts/updates a record in the index and persists it, returning whether
+    /// the asset was already indexed (i.e. this submission is a duplicate).
+    fn index_record(&self, record: &MediaRecord) -> Result<bool> {
+        let mut index = self.index.lock().unwrap();
+        let already = index.contains_key(&record.asset_id);
+        index.insert(record.asset_id.clone(), record.clone());
+        persist_index(&self.data_dir, &index).context("persisting index")?;
+        Ok(already)
+    }
+
     /// Finds an indexed record whose bytes are already on disk with the same
     /// content hash, so a re-upload reuses that file instead of writing a copy.
     /// @param sha256 - hex content hash of the incoming bytes

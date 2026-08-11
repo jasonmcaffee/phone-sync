@@ -16,6 +16,9 @@ final class PhoneSyncUITests: XCTestCase {
         app.launchArguments += ["-uitest-reset"]
         let serverURL = ProcessInfo.processInfo.environment["UITEST_SERVER_URL"] ?? "http://127.0.0.1:8080"
         app.launchEnvironment["UITEST_SERVER_URL"] = serverURL
+        // Force a tiny chunk size so uploads exercise the resumable chunked path
+        // (status → chunk → complete) end-to-end, not just single-shot uploads.
+        app.launchEnvironment["CHUNK_SIZE_OVERRIDE"] = "20000"
         // Auto-accept the photo permission dialog if it appears.
         addUIInterruptionMonitor(withDescription: "Photos") { alert in
             for label in ["Allow Access to All Photos", "Allow Full Access", "Allow"] {
@@ -64,7 +67,7 @@ final class PhoneSyncUITests: XCTestCase {
         // uploads complete, proving media reached the server.
         let syncedCount = app.staticTexts["syncedCount"]
         XCTAssertTrue(syncedCount.waitForExistence(timeout: 5))
-        let nonZeroSynced = NSPredicate(format: "NOT (label BEGINSWITH %@)", "0/")
+        let nonZeroSynced = NSPredicate(format: "NOT (label BEGINSWITH %@)", "0 of")
         expectation(for: nonZeroSynced, evaluatedWith: syncedCount, handler: nil)
         waitForExpectations(timeout: 90)
 

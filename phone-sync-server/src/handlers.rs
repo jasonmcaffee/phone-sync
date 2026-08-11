@@ -8,8 +8,8 @@ use axum::Json;
 
 use crate::error::ApiError;
 use crate::models::{
-    LoginRequest, LoginResponse, ManifestResponse, MediaListItem, MediaListResponse,
-    UploadMetadata, UploadResponse,
+    ChunkAck, ChunkMetadata, ChunkStatusResponse, CompleteRequest, LoginRequest, LoginResponse,
+    ManifestResponse, MediaListItem, MediaListResponse, UploadMetadata, UploadResponse,
 };
 use crate::state::AppState;
 use crate::storage::is_thumbnailable;
@@ -101,6 +101,60 @@ pub async fn upload(State(state): State<AppState>, mut multipart: Multipart) -> 
             stored: true,
             duplicate,
         }),
+    ))
+}
+
+/// Reports which chunks the server already holds for a content hash, and whether
+/// the full content is already stored — lets the client resume/skip work.
+pub async fn upload_status(State(state): State<AppState>, Path(sha256): Path<String>) -> Json<ChunkStatusResponse> {
+    let stored = state.storage.is_content_stored(&sha256);
+    let received = if stored { Vec::new() } else { state.storage.received_chunk_indices(&sha256) };
+    Json(ChunkStatusResponse { stored, received })
+}
+
+/// Accepts one chunk of a large upload (multipart: `metadata` {sha256,
+/// chunk_index} + `file`). Chunks are idempotent — re-sending one overwrites it.
+pub async fn upload_chunk(State(state): State<AppState>, mut multipart: Multipart) -> Result<Json<ChunkAck>, ApiError> {
+    let mut meta: Option<ChunkMetadata> = None;
+    let mut bytes: Option<Vec<u8>> = None;
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("malformed multipart: {e}")))?
+    {
+        match field.name() {
+            Some("metadata") => {
+                let text = field.text().await.map_err(|e| ApiError::BadRequest(format!("reading metadata: {e}")))?;
+                meta = Some(serde_json::from_str(&text).map_err(|e| ApiError::BadRequest(format!("invalid metadata json: {e}")))?);
+            }
+            Some("file") => {
+                let b = field.bytes().await.map_err(|e| ApiError::BadRequest(format!("reading chunk bytes: {e}")))?;
+                if b.len() > state.config.max_upload_bytes {
+                    return Err(ApiError::BadRequest("chunk exceeds max upload size".into()));
+                }
+                bytes = Some(b.to_vec());
+            }
+            _ => {}
+        }
+    }
+
+    let meta = meta.ok_or_else(|| ApiError::BadRequest("missing metadata part".into()))?;
+    let bytes = bytes.ok_or_else(|| ApiError::BadRequest("missing file part".into()))?;
+    state.storage.write_chunk(&meta.sha256, meta.chunk_index, &bytes).map_err(ApiError::from)?;
+    Ok(Json(ChunkAck { received: meta.chunk_index, ok: true }))
+}
+
+/// Finalizes a chunked upload: assembles and verifies the staged chunks into the
+/// stored file, filed by capture date like any other upload.
+pub async fn upload_complete(State(state): State<AppState>, Json(req): Json<CompleteRequest>) -> Result<(StatusCode, Json<UploadResponse>), ApiError> {
+    let (record, duplicate) = state
+        .storage
+        .assemble_and_store(&req.asset_id, &req.filename, &req.content_type, &req.media_type, &req.created_at, &req.sha256, req.total_chunks)
+        .map_err(ApiError::from)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(UploadResponse { id: record.sha256.clone(), sha256: record.sha256, stored: true, duplicate }),
     ))
 }
 

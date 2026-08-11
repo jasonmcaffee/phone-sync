@@ -63,6 +63,53 @@ final class ApiClient {
         return try await send(request, decode: UploadResponse.self)
     }
 
+    // MARK: - Chunked upload (files larger than the edge's body limit)
+
+    /// Queries the server for whether a file's content is already stored and
+    /// which chunk indices it already holds, so the client can skip/resume.
+    func uploadStatus(sha256: String, token: String) async throws -> ChunkStatusResponse {
+        let request = try makeRequest(path: "/media/upload/status/\(sha256)", method: "GET", token: token, jsonBody: Optional<CompleteRequest>.none)
+        return try await send(request, decode: ChunkStatusResponse.self)
+    }
+
+    /// Uploads a single chunk of a large file.
+    func uploadChunk(sha256: String, chunkIndex: Int, chunkData: Data, token: String) async throws {
+        guard let base = baseURL, let url = URL(string: "/media/upload/chunk", relativeTo: base) else {
+            throw ApiError.badURL
+        }
+        let boundary = "PhoneSyncChunk-\(UUID().uuidString)"
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        request.httpBody = makeChunkBody(sha256: sha256, chunkIndex: chunkIndex, chunkData: chunkData, boundary: boundary)
+        _ = try await send(request, decode: ChunkAck.self)
+    }
+
+    /// Finalizes a chunked upload; the server assembles and verifies the chunks.
+    func uploadComplete(_ completeRequest: CompleteRequest, token: String) async throws -> UploadResponse {
+        let request = try makeRequest(path: "/media/upload/complete", method: "POST", token: token, jsonBody: completeRequest)
+        return try await send(request, decode: UploadResponse.self)
+    }
+
+    /// Assembles a chunk's multipart body: a small JSON `metadata` part
+    /// ({sha256, chunk_index}) plus the binary `file` part.
+    private func makeChunkBody(sha256: String, chunkIndex: Int, chunkData: Data, boundary: String) -> Data {
+        var body = Data()
+        body.appendString("--\(boundary)\r\n")
+        body.appendString("Content-Disposition: form-data; name=\"metadata\"\r\n")
+        body.appendString("Content-Type: application/json\r\n\r\n")
+        body.appendString("{\"sha256\":\"\(sha256)\",\"chunk_index\":\(chunkIndex)}")
+        body.appendString("\r\n")
+        body.appendString("--\(boundary)\r\n")
+        body.appendString("Content-Disposition: form-data; name=\"file\"; filename=\"chunk\"\r\n")
+        body.appendString("Content-Type: application/octet-stream\r\n\r\n")
+        body.append(chunkData)
+        body.appendString("\r\n")
+        body.appendString("--\(boundary)--\r\n")
+        return body
+    }
+
     // MARK: - Internals
 
     /// Builds a JSON (or bodyless) request with optional bearer auth.
