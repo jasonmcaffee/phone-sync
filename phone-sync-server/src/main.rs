@@ -35,8 +35,29 @@ async fn main() -> anyhow::Result<()> {
     let bind_addr = state.config.bind_addr.clone();
     let app = build_app(state);
 
-    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+    let listener = bind_with_retry(&bind_addr).await?;
     tracing::info!("phone-sync-server listening on {bind_addr}");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Binds the listener, retrying briefly while the address is still in use.
+///
+/// A service-manager "restart" starts the replacement before Windows has
+/// finished releasing the old process's socket, which otherwise kills the new
+/// process outright with `os error 10048` and leaves the backup server down.
+/// @param bind_addr - the address to listen on
+async fn bind_with_retry(bind_addr: &str) -> anyhow::Result<tokio::net::TcpListener> {
+    const ATTEMPTS: u32 = 30;
+    for attempt in 1..=ATTEMPTS {
+        match tokio::net::TcpListener::bind(bind_addr).await {
+            Ok(listener) => return Ok(listener),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && attempt < ATTEMPTS => {
+                tracing::warn!("{bind_addr} still in use (attempt {attempt}/{ATTEMPTS}), retrying...");
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    unreachable!("the loop either binds or returns the final error")
 }
