@@ -25,6 +25,7 @@ async fn spawn_server() -> (String, tempfile::TempDir) {
         jwt_secret: "test-secret".into(),
         token_ttl_secs: 365 * 24 * 60 * 60,
         max_upload_bytes: 10 * 1024 * 1024,
+        ffmpeg_path: "ffmpeg".into(),
     };
     let storage = Storage::open(
         config.data_dir.clone(),
@@ -571,4 +572,41 @@ async fn failed_assembly_leaves_no_temp_file_in_the_library() {
         .map(|entries| entries.map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect())
         .unwrap_or_default();
     assert!(leftovers.is_empty(), "no partial file left behind, found {leftovers:?}");
+}
+
+#[tokio::test]
+async fn client_can_upload_thumbnail_for_undecodable_media() {
+    let (base, _tmp) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let token = login(&base, &client).await;
+
+    // A "HEIC" the server can't decode/thumbnail on its own.
+    let form = upload_form("heic-1", "IMG_0001.HEIC", "image/heic", "photo", b"pseudo-heic-bytes".to_vec());
+    let up: Value = client.post(format!("{base}/media/upload")).bearer_auth(&token).multipart(form).send().await.unwrap().json().await.unwrap();
+    let id = up["id"].as_str().unwrap().to_string();
+
+    // No server-generatable thumbnail yet.
+    let none = client.get(format!("{base}/media/{id}/thumb")).bearer_auth(&token).send().await.unwrap();
+    assert_eq!(none.status(), 400);
+
+    // Listing exposes the asset id and thumbnailable=false.
+    let list: Value = client.get(format!("{base}/api/media")).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
+    let item = list["items"].as_array().unwrap().iter().find(|i| i["id"] == id).unwrap();
+    assert_eq!(item["asset_id"], "heic-1");
+    // The server reports everything as thumbnailable (it will try ffmpeg); the
+    // actual bytes only exist once generated or uploaded.
+    assert_eq!(item["thumbnailable"], true);
+
+    // Client uploads a preview; it is then served and the item becomes thumbnailable.
+    let thumb = make_png();
+    let put = client.post(format!("{base}/media/{id}/thumb")).bearer_auth(&token).body(thumb.clone()).send().await.unwrap();
+    assert_eq!(put.status(), 201);
+
+    let got = client.get(format!("{base}/media/{id}/thumb")).bearer_auth(&token).send().await.unwrap();
+    assert_eq!(got.status(), 200);
+    assert_eq!(got.bytes().await.unwrap().to_vec(), thumb);
+
+    let list2: Value = client.get(format!("{base}/api/media")).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
+    let item2 = list2["items"].as_array().unwrap().iter().find(|i| i["id"] == id).unwrap();
+    assert_eq!(item2["thumbnailable"], true);
 }

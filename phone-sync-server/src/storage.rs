@@ -83,23 +83,54 @@ impl Storage {
         records
     }
 
-    /// Returns a cached (or freshly generated) JPEG thumbnail for an image
-    /// record, or None if the format can't be decoded (e.g. HEIC/video).
-    /// Thumbnails are ~512px on the long edge and cached under `thumbs/`.
-    pub fn thumbnail_bytes(&self, record: &MediaRecord) -> Option<Vec<u8>> {
-        if !is_thumbnailable(&record.content_type, &record.filename) {
-            return None;
-        }
-        let cache_path = self.data_dir.join("thumbs").join(format!("{}.jpg", record.sha256));
+    /// Path of the cached JPEG thumbnail for a content hash.
+    fn thumb_path(&self, sha256: &str) -> PathBuf {
+        self.data_dir.join("thumbs").join(format!("{}.jpg", sha256))
+    }
+
+    /// True if a thumbnail (client-uploaded or previously generated) exists.
+    /// @param sha256 - content hash
+    pub fn has_thumbnail(&self, sha256: &str) -> bool {
+        self.thumb_path(sha256).exists()
+    }
+
+    /// Stores a client-provided JPEG thumbnail for a content hash. iOS can
+    /// thumbnail HEIC and video (which the server's image decoder can't), so the
+    /// app uploads previews here for everything.
+    /// @param sha256 - content hash the thumbnail belongs to
+    /// @param jpeg - the JPEG thumbnail bytes
+    pub fn store_thumbnail(&self, sha256: &str, jpeg: &[u8]) -> Result<()> {
+        write_atomic(&self.thumb_path(sha256), jpeg).context("writing thumbnail")
+    }
+
+    /// Returns a thumbnail for a record, generating and caching it on first use:
+    ///   cached JPEG → image-crate decode (JPEG/PNG/…) → ffmpeg (HEIC/video).
+    /// None only if every path fails (e.g. HEIC/video and ffmpeg unavailable).
+    /// @param record - the media record to thumbnail
+    /// @param ffmpeg - path to the ffmpeg binary for formats the image crate can't decode
+    pub fn thumbnail_bytes(&self, record: &MediaRecord, ffmpeg: &str) -> Option<Vec<u8>> {
+        let cache_path = self.thumb_path(&record.sha256);
         if let Ok(bytes) = std::fs::read(&cache_path) {
             return Some(bytes);
         }
-        let original = std::fs::read(self.absolute_path(record)).ok()?;
-        let image = image::load_from_memory(&original).ok()?;
-        let thumb = image.thumbnail(512, 512);
-        let mut buf = std::io::Cursor::new(Vec::new());
-        thumb.write_to(&mut buf, image::ImageFormat::Jpeg).ok()?;
-        let bytes = buf.into_inner();
+        let source = self.absolute_path(record);
+
+        let generated = if is_thumbnailable(&record.content_type, &record.filename) {
+            std::fs::read(&source)
+                .ok()
+                .and_then(|original| image::load_from_memory(&original).ok())
+                .and_then(|image| {
+                    let thumb = image.thumbnail(512, 512);
+                    let mut buf = std::io::Cursor::new(Vec::new());
+                    thumb.write_to(&mut buf, image::ImageFormat::Jpeg).ok()?;
+                    Some(buf.into_inner())
+                })
+        } else {
+            // HEIC stills and videos — decode a frame with ffmpeg.
+            ffmpeg_thumbnail(ffmpeg, &source, &record.media_type)
+        };
+
+        let bytes = generated?;
         let _ = write_atomic(&cache_path, &bytes);
         Some(bytes)
     }
@@ -322,9 +353,54 @@ impl Storage {
     }
 }
 
+/// Generates a ~512px-wide JPEG thumbnail by shelling out to ffmpeg, for the
+/// formats the pure-Rust image crate can't decode: HEIC stills and video frames.
+/// For videos it seeks ~1s in for a representative frame, falling back to the
+/// first frame for very short clips. Returns None if ffmpeg is missing or fails.
+/// @param ffmpeg - path to the ffmpeg binary
+/// @param source - the media file to thumbnail
+/// @param media_type - "photo" or "video"
+fn ffmpeg_thumbnail(ffmpeg: &str, source: &Path, media_type: &str) -> Option<Vec<u8>> {
+    let ticket = TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let out = std::env::temp_dir().join(format!("psync-thumb-{}-{ticket}.jpg", std::process::id()));
+
+    // Decode a single full-resolution frame with no `-vf`: HEIC stills are
+    // decoded through an internal complex filtergraph on some ffmpeg builds,
+    // which conflicts with a simple `-vf scale`. We downscale afterwards with
+    // the image crate instead, which works for the JPEG ffmpeg emits.
+    let run = |seek: Option<&str>| -> bool {
+        let mut cmd = std::process::Command::new(ffmpeg);
+        cmd.arg("-y").arg("-loglevel").arg("error");
+        if let Some(s) = seek {
+            cmd.arg("-ss").arg(s);
+        }
+        cmd.arg("-i").arg(source).arg("-frames:v").arg("1").arg(&out);
+        matches!(cmd.output(), Ok(o) if o.status.success())
+            && std::fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false)
+    };
+
+    let ok = if media_type == "video" {
+        run(Some("00:00:01")) || run(None)
+    } else {
+        run(None)
+    };
+    if !ok {
+        let _ = std::fs::remove_file(&out);
+        return None;
+    }
+
+    let full = std::fs::read(&out).ok();
+    let _ = std::fs::remove_file(&out);
+    let image = image::load_from_memory(&full?).ok()?;
+    let thumb = image.thumbnail(512, 512);
+    let mut buf = std::io::Cursor::new(Vec::new());
+    thumb.write_to(&mut buf, image::ImageFormat::Jpeg).ok()?;
+    Some(buf.into_inner())
+}
+
 /// Reports whether an item can be decoded into an image thumbnail by the
-/// pure-Rust `image` crate (JPEG/PNG/GIF/WebP/BMP/TIFF). HEIC and videos can't
-/// be decoded here and fall back to a client-side treatment.
+/// pure-Rust `image` crate (JPEG/PNG/GIF/WebP/BMP/TIFF). HEIC and videos are
+/// handled via ffmpeg instead.
 pub fn is_thumbnailable(content_type: &str, filename: &str) -> bool {
     let ct = content_type.to_lowercase();
     if ct == "image/jpeg" || ct == "image/png" || ct == "image/gif" || ct == "image/webp" || ct == "image/bmp" || ct == "image/tiff" {

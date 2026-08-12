@@ -12,7 +12,6 @@ use crate::models::{
     ManifestResponse, MediaListItem, MediaListResponse, UploadMetadata, UploadResponse,
 };
 use crate::state::AppState;
-use crate::storage::is_thumbnailable;
 use crate::auth;
 use sha2::Digest;
 
@@ -182,18 +181,34 @@ pub async fn list_media(State(state): State<AppState>) -> Result<Json<MediaListR
         .all_records()
         .into_iter()
         .map(|r| MediaListItem {
+            // The server can thumbnail every format (image crate for JPEG/PNG,
+            // ffmpeg for HEIC/video), generated on demand and cached.
+            thumbnailable: true,
             id: r.sha256,
+            asset_id: r.asset_id,
             filename: r.filename,
-            content_type: r.content_type.clone(),
+            content_type: r.content_type,
             media_type: r.media_type,
             created_at: r.created_at,
             size: r.size,
             rel_path: r.rel_path,
-            thumbnailable: is_thumbnailable(&r.content_type, ""),
         })
         .collect();
     let count = items.len();
     Ok(Json(MediaListResponse { items, count }))
+}
+
+/// Stores a client-generated JPEG thumbnail for an item (request body is the
+/// JPEG). Lets iOS supply previews for HEIC/video the server can't decode.
+pub async fn put_thumbnail(State(state): State<AppState>, Path(id): Path<String>, body: axum::body::Bytes) -> Result<StatusCode, ApiError> {
+    if state.storage.get_by_id(&id).is_none() {
+        return Err(ApiError::BadRequest("no such media id".into()));
+    }
+    if body.is_empty() {
+        return Err(ApiError::BadRequest("empty thumbnail".into()));
+    }
+    state.storage.store_thumbnail(&id, &body).map_err(ApiError::from)?;
+    Ok(StatusCode::CREATED)
 }
 
 /// Returns a cached JPEG thumbnail for an image item. For items that can't be
@@ -203,14 +218,23 @@ pub async fn get_thumb(State(state): State<AppState>, Path(id): Path<String>) ->
         .storage
         .get_by_id(&id)
         .ok_or_else(|| ApiError::BadRequest("no such media id".into()))?;
-    match state.storage.thumbnail_bytes(&record) {
+
+    // Generation (image crate or ffmpeg) is CPU/subprocess work — keep it off the
+    // async runtime so one slow HEIC/video decode can't stall other requests.
+    let storage = state.storage.clone();
+    let ffmpeg = state.config.ffmpeg_path.clone();
+    let bytes = tokio::task::spawn_blocking(move || storage.thumbnail_bytes(&record, &ffmpeg))
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    match bytes {
         Some(bytes) => Ok(Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "image/jpeg")
-            .header(header::CACHE_CONTROL, "private, max-age=86400")
+            .header(header::CACHE_CONTROL, "private, max-age=604800")
             .body(Body::from(bytes))
             .map_err(|e| ApiError::Internal(e.to_string()))?),
-        None => Err(ApiError::BadRequest("no thumbnail for this media type".into())),
+        None => Err(ApiError::BadRequest("no thumbnail available".into())),
     }
 }
 

@@ -209,22 +209,27 @@ function makeTile(item, index) {
   tile.className = "tile";
   tile.onclick = () => openLightbox(index);
 
-  if (item.media_type === "video") {
-    const v = document.createElement("video");
-    v.src = mediaURL(item.id); v.muted = true; v.playsInline = true; v.preload = "metadata";
-    tile.appendChild(v);
-    tile.insertAdjacentHTML("beforeend",
-      `<span class="badge type">▶ Video</span>
-       <span class="play"><svg viewBox="0 0 24 24" fill="white"><path d="M8 5v14l11-7z"/></svg></span>`);
-  } else if (item.thumbnailable) {
-    const img = document.createElement("img");
-    img.loading = "lazy"; img.src = mediaURL(item.id, "thumb");
-    img.onerror = () => { tile.innerHTML = fallbackHTML(item); };
-    tile.appendChild(img);
-  } else {
+  // The server thumbnails every format now (ffmpeg for HEIC/video), so a plain
+  // <img> pointed at the thumbnail works for all items.
+  const img = document.createElement("img");
+  img.loading = "lazy";
+  img.src = mediaURL(item.id, "thumb");
+  img.onerror = () => {
     tile.innerHTML = fallbackHTML(item);
+    if (item.media_type === "video") tile.insertAdjacentHTML("beforeend", videoBadgeHTML());
+  };
+  tile.appendChild(img);
+
+  if (item.media_type === "video") {
+    tile.insertAdjacentHTML("beforeend", videoBadgeHTML());
   }
   return tile;
+}
+
+/** Video badge + play overlay markup. */
+function videoBadgeHTML() {
+  return `<span class="badge type">▶ Video</span>
+          <span class="play"><svg viewBox="0 0 24 24" fill="white"><path d="M8 5v14l11-7z"/></svg></span>`;
 }
 
 /** Fallback markup for undecodable images (e.g. HEIC). */

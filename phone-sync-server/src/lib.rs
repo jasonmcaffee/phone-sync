@@ -31,7 +31,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/media/upload/complete", post(handlers::upload_complete))
         .route("/api/media", get(handlers::list_media))
         .route("/media/:id", get(handlers::get_media))
-        .route("/media/:id/thumb", get(handlers::get_thumb))
+        .route("/media/:id/thumb", get(handlers::get_thumb).post(handlers::put_thumbnail))
         .layer(middleware::from_fn_with_state(state.clone(), auth::require_auth));
 
     // Public routes (the gallery page shell loads, then authenticates via JS).

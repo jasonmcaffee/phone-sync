@@ -100,6 +100,7 @@ struct StoredSyncRecord: Codable {
 /// local assets, since local synced items may be deleted later.
 struct MediaListItem: Decodable {
     let id: String            // sha256 content id
+    let assetId: String       // client localIdentifier (maps back to a local asset)
     let filename: String
     let contentType: String
     let mediaType: String     // "photo" | "video"
@@ -109,6 +110,7 @@ struct MediaListItem: Decodable {
 
     enum CodingKeys: String, CodingKey {
         case id, filename, size, thumbnailable
+        case assetId = "asset_id"
         case contentType = "content_type"
         case mediaType = "media_type"
         case createdAt = "created_at"

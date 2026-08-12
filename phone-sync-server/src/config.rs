@@ -28,6 +28,10 @@ pub struct Config {
     pub token_ttl_secs: i64,
     /// Maximum accepted upload size in bytes.
     pub max_upload_bytes: usize,
+    /// Path to the `ffmpeg` binary, used to thumbnail formats the pure-Rust
+    /// image decoder can't handle (HEIC stills and video frames). Defaults to
+    /// `ffmpeg` on PATH; set `PHONE_SYNC_FFMPEG` to an absolute path otherwise.
+    pub ffmpeg_path: String,
 }
 
 /// Builds the configuration from environment variables, falling back to
@@ -65,6 +69,7 @@ pub fn load() -> Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(2 * 1024 * 1024 * 1024),
+        ffmpeg_path: std::env::var("PHONE_SYNC_FFMPEG").unwrap_or_else(|_| "ffmpeg".to_string()),
         data_dir,
         media_root,
     }

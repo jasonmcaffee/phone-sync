@@ -32,6 +32,36 @@ async fn main() -> anyhow::Result<()> {
         storage: Arc::new(storage),
     };
 
+    // Background: pre-generate thumbnails for the whole library so the web UI is
+    // fast even for years of existing photos/videos. Skips items already cached,
+    // so it's cheap on subsequent restarts.
+    {
+        let storage = state.storage.clone();
+        let ffmpeg = state.config.ffmpeg_path.clone();
+        tokio::spawn(async move {
+            let records = storage.all_records();
+            let mut made = 0usize;
+            for record in records {
+                if storage.has_thumbnail(&record.sha256) {
+                    continue;
+                }
+                let (s, f) = (storage.clone(), ffmpeg.clone());
+                if tokio::task::spawn_blocking(move || s.thumbnail_bytes(&record, &f))
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some()
+                {
+                    made += 1;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            if made > 0 {
+                tracing::info!("thumbnail pre-generation complete: {made} generated");
+            }
+        });
+    }
+
     let bind_addr = state.config.bind_addr.clone();
     let app = build_app(state);
 

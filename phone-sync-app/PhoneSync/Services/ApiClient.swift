@@ -68,6 +68,23 @@ final class ApiClient {
         return URL(string: "media/\(id)/thumb?token=\(token)", relativeTo: base)
     }
 
+    /// Uploads a client-generated JPEG preview for an item (so the server can
+    /// serve thumbnails for HEIC/video it can't decode itself).
+    func uploadThumbnail(id: String, jpegData: Data, token: String) async throws {
+        guard let base = baseURL, let url = URL(string: "media/\(id)/thumb", relativeTo: base) else {
+            throw ApiError.badURL
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
+        let (data, response) = try await session.upload(for: request, from: jpegData)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            throw ApiError.server(status: status, message: String(data: data, encoding: .utf8) ?? "")
+        }
+    }
+
     /// Uploads one asset with its metadata as multipart/form-data, streaming the
     /// request body from a temp file so the body is never held whole in memory.
     func upload(metadata: UploadMetadata, fileData: Data, token: String) async throws -> UploadResponse {

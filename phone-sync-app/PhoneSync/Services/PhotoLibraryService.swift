@@ -63,6 +63,12 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
         return assets
     }
 
+    /// Looks up a local asset by its localIdentifier (used to generate a preview
+    /// for a server item that is still on this device).
+    func asset(withLocalIdentifier id: String) -> PHAsset? {
+        PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject
+    }
+
     /// Renders a thumbnail for grid display at approximately `targetSize`.
     func thumbnail(for asset: PHAsset, targetSize: CGSize) async -> UIImage? {
         await withCheckedContinuation { continuation in

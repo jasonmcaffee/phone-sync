@@ -95,11 +95,14 @@ pub struct ManifestResponse {
     pub count: usize,
 }
 
-/// A single item as presented to the web gallery.
+/// A single item as presented to the web gallery / iOS Synced view.
 #[derive(Debug, Serialize)]
 pub struct MediaListItem {
     /// Content id (sha256) used to fetch bytes/thumbnail.
     pub id: String,
+    /// The client-side asset identifier, so the app can map a server item back
+    /// to a local asset (e.g. to generate a preview while it is still on-device).
+    pub asset_id: String,
     pub filename: String,
     pub content_type: String,
     pub media_type: String,
