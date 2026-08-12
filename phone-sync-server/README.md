@@ -31,6 +31,7 @@ ipconfig getifaddr en0
 | `PHONE_SYNC_JWT_SECRET` | generated + persisted | HMAC secret; see below |
 | `PHONE_SYNC_TOKEN_TTL_SECS` | `31536000` (1 year) | Token lifetime |
 | `PHONE_SYNC_MAX_UPLOAD_BYTES` | `2147483648` (2 GB) | Per-file upload cap |
+| `PHONE_SYNC_FFMPEG` | `ffmpeg` | Path to the ffmpeg binary (thumbnails for HEIC/video) |
 
 To generate a production password hash, run the server once and copy the login flow,
 or add a small helper; the dev default is fine for local use.
@@ -80,10 +81,20 @@ and videos, click any item to **maximize** it, and videos **play** inline (with
 HTTP range/streaming support for seeking). Image thumbnails are generated and
 cached server-side.
 
-**HEIC note:** iPhone originals are often HEIC/HEVC, which neither the pure-Rust
-image decoder nor most browsers (Chrome/Firefox) can display. Those items show a
-labeled fallback tile with a download link and render natively in Safari. Adding
-server-side HEIC→JPEG transcoding (via libheif) is a future enhancement.
+**Thumbnails (HEIC & video).** The pure-Rust image decoder handles JPEG/PNG/etc.
+For HEIC stills and video frames — which it can't decode — the server shells out
+to **ffmpeg**: it decodes one full frame (seeking ~1s into videos) and downscales
+it, caching the result under `thumbs/<sha>.jpg`. So the web gallery shows real
+previews (and video posters) for everything.
+
+Requirements: **ffmpeg must be installed** on the server host, and for HEIC it
+must be a build with **HEIF/libheif support** (e.g. the gyan.dev "full" build on
+Windows). Point `PHONE_SYNC_FFMPEG` at it if it isn't on `PATH`. On startup a
+background task pre-generates any missing thumbnails across the whole library, so
+years of existing photos/videos get previews without opening each one.
+
+Note that HEVC videos may still not *play* in Chrome/Firefox (a browser codec
+limitation); they play in Safari and on the device.
 
 ## API
 
