@@ -191,6 +191,8 @@ final class SyncEngine: ObservableObject {
             }
             markSynced(assetId: assetId, sha: sha, serverId: response.id)
             uploadedThisRun += 1
+            lastError = nil // a success clears any transient error, so the warning
+                            // indicator only shows while an error is actually current
             return .success
         } catch let error as ApiError {
             setState(.failed, for: assetId)

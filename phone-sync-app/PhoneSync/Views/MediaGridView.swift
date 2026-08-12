@@ -129,9 +129,6 @@ struct MediaGridView: View {
                 ProgressView(value: Double(syncEngine.uploadedThisRun), total: Double(max(syncEngine.totalThisRun, 1)))
                     .padding(.horizontal)
             }
-            if let error = syncEngine.lastError {
-                Text(error).font(.caption).foregroundStyle(.red).lineLimit(2).multilineTextAlignment(.center)
-            }
             Button {
                 environment.runSyncPass()
             } label: {
@@ -142,6 +139,14 @@ struct MediaGridView: View {
                         Text(String(format: "%.1f MB/s", syncEngine.uploadSpeedMBps))
                             .fontWeight(.semibold)
                             .monospacedDigit()
+                        // Yellow warning only while an error is actually current
+                        // (cleared as soon as an upload succeeds again).
+                        if let error = syncEngine.lastError {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.yellow)
+                                .accessibilityLabel(error)
+                                .accessibilityIdentifier("syncWarning")
+                        }
                     } else {
                         Image(systemName: "arrow.triangle.2.circlepath")
                         Text("Sync now").fontWeight(.semibold)
