@@ -93,6 +93,34 @@ struct StoredSyncRecord: Codable {
     var lastAttempt: Double?
 }
 
+// MARK: - Server library listing (for the "Synced" view)
+
+/// A media item as returned by the server's gallery listing (`/api/media`).
+/// The Synced view shows these (what the server actually holds) rather than
+/// local assets, since local synced items may be deleted later.
+struct MediaListItem: Decodable {
+    let id: String            // sha256 content id
+    let filename: String
+    let contentType: String
+    let mediaType: String     // "photo" | "video"
+    let createdAt: String     // ISO-8601
+    let size: Int64
+    let thumbnailable: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case id, filename, size, thumbnailable
+        case contentType = "content_type"
+        case mediaType = "media_type"
+        case createdAt = "created_at"
+    }
+}
+
+/// The server gallery listing response.
+struct MediaListResponse: Decodable {
+    let items: [MediaListItem]
+    let count: Int
+}
+
 // MARK: - Chunked upload
 
 /// Tunables for how large files are chunked. Cloudflare's proxied edge caps a

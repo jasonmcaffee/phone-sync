@@ -49,6 +49,25 @@ final class ApiClient {
         return Set(response.assetIds)
     }
 
+    /// Fetches the full server library listing (newest first) for the Synced view.
+    func fetchMediaList(token: String) async throws -> [MediaListItem] {
+        let request = try makeRequest(path: "/api/media", method: "GET", token: token, jsonBody: Optional<LoginRequest>.none)
+        return try await send(request, decode: MediaListResponse.self).items
+    }
+
+    /// Authenticated URL for a stored item's full bytes (image load / AVPlayer).
+    /// The token rides as a query param since image/video loaders can't set headers.
+    func mediaURL(id: String, token: String) -> URL? {
+        guard let base = baseURL else { return nil }
+        return URL(string: "media/\(id)?token=\(token)", relativeTo: base)
+    }
+
+    /// Authenticated URL for a stored image item's cached thumbnail.
+    func thumbnailURL(id: String, token: String) -> URL? {
+        guard let base = baseURL else { return nil }
+        return URL(string: "media/\(id)/thumb?token=\(token)", relativeTo: base)
+    }
+
     /// Uploads one asset with its metadata as multipart/form-data, streaming the
     /// request body from a temp file so the body is never held whole in memory.
     func upload(metadata: UploadMetadata, fileData: Data, token: String) async throws -> UploadResponse {
