@@ -17,6 +17,16 @@ struct ExportedAsset {
     let mediaType: String   // "photo" | "video"
 }
 
+/// Full-resolution export written to a temporary file on disk, so large videos
+/// never have to be held whole in memory. The caller deletes `url` when done.
+struct ExportedFile {
+    let url: URL
+    let filename: String
+    let contentType: String
+    let mediaType: String
+    let size: Int
+}
+
 /// Wraps PhotoKit: authorization, fetching photos/videos, thumbnail rendering,
 /// full-resolution export for upload, and change observation so new captures
 /// can trigger a sync.
@@ -87,6 +97,37 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
             ?? (asset.mediaType == .video ? "video/quicktime" : "image/jpeg")
         let mediaType = asset.mediaType == .video ? "video" : "photo"
         return ExportedAsset(data: data, filename: resource.originalFilename, contentType: contentType, mediaType: mediaType)
+    }
+
+    /// Exports the full-resolution original to a temporary file, streaming bytes
+    /// straight to disk via `writeData(for:toFile:)` so a multi-GB video is never
+    /// buffered in memory (which would jetsam-kill the app). Returns nil if the
+    /// resource can't be written. The caller must delete the returned file.
+    func exportToTempFile(_ asset: PHAsset) async -> ExportedFile? {
+        let resources = PHAssetResource.assetResources(for: asset)
+        guard let resource = primaryResource(from: resources, mediaType: asset.mediaType) else {
+            return nil
+        }
+        let contentType = UTType(resource.uniformTypeIdentifier)?.preferredMIMEType
+            ?? (asset.mediaType == .video ? "video/quicktime" : "image/jpeg")
+        let mediaType = asset.mediaType == .video ? "video" : "photo"
+        let tmpURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("phonesync-\(UUID().uuidString)-\(resource.originalFilename)")
+
+        let options = PHAssetResourceRequestOptions()
+        options.isNetworkAccessAllowed = true
+        let wrote: Bool = await withCheckedContinuation { continuation in
+            PHAssetResourceManager.default().writeData(for: resource, toFile: tmpURL, options: options) { error in
+                continuation.resume(returning: error == nil)
+            }
+        }
+        guard wrote else {
+            try? FileManager.default.removeItem(at: tmpURL)
+            return nil
+        }
+        let attrs = try? FileManager.default.attributesOfItem(atPath: tmpURL.path)
+        let size = (attrs?[.size] as? NSNumber)?.intValue ?? 0
+        return ExportedFile(url: tmpURL, filename: resource.originalFilename, contentType: contentType, mediaType: mediaType, size: size)
     }
 
     /// Picks the best resource to upload for the given media type.

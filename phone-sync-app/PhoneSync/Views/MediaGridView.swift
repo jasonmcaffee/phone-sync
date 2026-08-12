@@ -51,6 +51,13 @@ struct MediaGridView: View {
             await grid.load()
             await syncEngine.reconcile(assets: grid.assets)
             grid.startAutoSync { environment.runSyncPass() }
+            #if DEBUG
+            // Debug hook: auto-start a sync on launch so a crash can be
+            // reproduced/observed without tapping. Enabled via DEMO_AUTOSYNC=1.
+            if ProcessInfo.processInfo.environment["DEMO_AUTOSYNC"] == "1" {
+                environment.runSyncPass()
+            }
+            #endif
         }
     }
 
@@ -128,10 +135,17 @@ struct MediaGridView: View {
             Button {
                 environment.runSyncPass()
             } label: {
-                HStack {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                    Text(syncEngine.isSyncing ? "Syncing… (\(syncEngine.uploadedThisRun)/\(syncEngine.totalThisRun))" : "Sync now")
-                        .fontWeight(.semibold)
+                HStack(spacing: 8) {
+                    if syncEngine.isSyncing {
+                        // Spinning icon + live upload speed (no "Syncing…" text).
+                        ProgressView().tint(.white)
+                        Text(String(format: "%.1f MB/s", syncEngine.uploadSpeedMBps))
+                            .fontWeight(.semibold)
+                            .monospacedDigit()
+                    } else {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                        Text("Sync now").fontWeight(.semibold)
+                    }
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 12)

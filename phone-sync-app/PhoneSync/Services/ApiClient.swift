@@ -49,18 +49,20 @@ final class ApiClient {
         return Set(response.assetIds)
     }
 
-    /// Uploads one asset's bytes with its metadata as multipart/form-data.
+    /// Uploads one asset with its metadata as multipart/form-data, streaming the
+    /// request body from a temp file so the body is never held whole in memory.
     func upload(metadata: UploadMetadata, fileData: Data, token: String) async throws -> UploadResponse {
         guard let base = baseURL, let url = URL(string: "/media/upload", relativeTo: base) else {
             throw ApiError.badURL
         }
         let boundary = "PhoneSyncBoundary-\(UUID().uuidString)"
+        let bodyURL = try writeMultipartFileBody(metadata: metadata, fileData: fileData, boundary: boundary)
+        defer { try? FileManager.default.removeItem(at: bodyURL) }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try makeMultipartBody(metadata: metadata, fileData: fileData, boundary: boundary)
-        return try await send(request, decode: UploadResponse.self)
+        return try await sendUpload(request, fromFile: bodyURL, decode: UploadResponse.self)
     }
 
     // MARK: - Chunked upload (files larger than the edge's body limit)
@@ -72,18 +74,20 @@ final class ApiClient {
         return try await send(request, decode: ChunkStatusResponse.self)
     }
 
-    /// Uploads a single chunk of a large file.
+    /// Uploads a single chunk, streaming the multipart body from a temp file so
+    /// large chunks don't accumulate in memory (which was OOM-killing the app).
     func uploadChunk(sha256: String, chunkIndex: Int, chunkData: Data, token: String) async throws {
         guard let base = baseURL, let url = URL(string: "/media/upload/chunk", relativeTo: base) else {
             throw ApiError.badURL
         }
         let boundary = "PhoneSyncChunk-\(UUID().uuidString)"
+        let bodyURL = try writeChunkFileBody(sha256: sha256, chunkIndex: chunkIndex, chunkData: chunkData, boundary: boundary)
+        defer { try? FileManager.default.removeItem(at: bodyURL) }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        request.httpBody = makeChunkBody(sha256: sha256, chunkIndex: chunkIndex, chunkData: chunkData, boundary: boundary)
-        _ = try await send(request, decode: ChunkAck.self)
+        _ = try await sendUpload(request, fromFile: bodyURL, decode: ChunkAck.self)
     }
 
     /// Finalizes a chunked upload; the server assembles and verifies the chunks.
@@ -92,22 +96,61 @@ final class ApiClient {
         return try await send(request, decode: UploadResponse.self)
     }
 
-    /// Assembles a chunk's multipart body: a small JSON `metadata` part
-    /// ({sha256, chunk_index}) plus the binary `file` part.
-    private func makeChunkBody(sha256: String, chunkIndex: Int, chunkData: Data, boundary: String) -> Data {
-        var body = Data()
-        body.appendString("--\(boundary)\r\n")
-        body.appendString("Content-Disposition: form-data; name=\"metadata\"\r\n")
-        body.appendString("Content-Type: application/json\r\n\r\n")
-        body.appendString("{\"sha256\":\"\(sha256)\",\"chunk_index\":\(chunkIndex)}")
-        body.appendString("\r\n")
-        body.appendString("--\(boundary)\r\n")
-        body.appendString("Content-Disposition: form-data; name=\"file\"; filename=\"chunk\"\r\n")
-        body.appendString("Content-Type: application/octet-stream\r\n\r\n")
-        body.append(chunkData)
-        body.appendString("\r\n")
-        body.appendString("--\(boundary)--\r\n")
-        return body
+    /// Writes a full asset upload's multipart body (metadata + file) to a temp
+    /// file and returns its URL. The caller deletes it after the upload.
+    private func writeMultipartFileBody(metadata: UploadMetadata, fileData: Data, boundary: String) throws -> URL {
+        let bodyURL = FileManager.default.temporaryDirectory.appendingPathComponent("psync-body-\(UUID().uuidString)")
+        FileManager.default.createFile(atPath: bodyURL.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: bodyURL)
+        defer { try? handle.close() }
+        let metadataJSON = try JSONEncoder().encode(metadata)
+        handle.write(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"metadata\"\r\nContent-Type: application/json\r\n\r\n".utf8))
+        handle.write(metadataJSON)
+        handle.write(Data("\r\n--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"\(metadata.filename)\"\r\nContent-Type: \(metadata.contentType)\r\n\r\n".utf8))
+        handle.write(fileData)
+        handle.write(Data("\r\n--\(boundary)--\r\n".utf8))
+        return bodyURL
+    }
+
+    /// Writes one chunk's multipart body ({sha256, chunk_index} + bytes) to a
+    /// temp file and returns its URL. The caller deletes it after the upload.
+    private func writeChunkFileBody(sha256: String, chunkIndex: Int, chunkData: Data, boundary: String) throws -> URL {
+        let bodyURL = FileManager.default.temporaryDirectory.appendingPathComponent("psync-chunk-\(UUID().uuidString)")
+        FileManager.default.createFile(atPath: bodyURL.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: bodyURL)
+        defer { try? handle.close() }
+        handle.write(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"metadata\"\r\nContent-Type: application/json\r\n\r\n".utf8))
+        handle.write(Data("{\"sha256\":\"\(sha256)\",\"chunk_index\":\(chunkIndex)}".utf8))
+        handle.write(Data("\r\n--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"chunk\"\r\nContent-Type: application/octet-stream\r\n\r\n".utf8))
+        handle.write(chunkData)
+        handle.write(Data("\r\n--\(boundary)--\r\n".utf8))
+        return bodyURL
+    }
+
+    /// Streams an upload request body from a file and decodes the JSON response,
+    /// applying the same status-code handling as `send`. Using `upload(fromFile:)`
+    /// keeps the (potentially large) body on disk instead of buffered in memory.
+    private func sendUpload<T: Decodable>(_ request: URLRequest, fromFile fileURL: URL, decode: T.Type) async throws -> T {
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.upload(for: request, fromFile: fileURL)
+        } catch {
+            throw ApiError.transport(error.localizedDescription)
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw ApiError.transport("no HTTP response")
+        }
+        if http.statusCode == 401 { throw ApiError.unauthorized }
+        guard (200...299).contains(http.statusCode) else {
+            let message = String(data: data, encoding: .utf8) ?? ""
+            throw ApiError.server(status: http.statusCode, message: message)
+        }
+        do {
+            return try JSONDecoder().decode(T.self, from: data)
+        } catch {
+            throw ApiError.decoding(error.localizedDescription)
+        }
     }
 
     // MARK: - Internals

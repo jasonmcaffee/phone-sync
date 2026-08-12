@@ -98,16 +98,18 @@ struct StoredSyncRecord: Codable {
 /// Tunables for how large files are chunked. Cloudflare's proxied edge caps a
 /// single request body at 100 MB, so anything larger is uploaded in pieces.
 enum SyncTuning {
-    /// Max bytes per chunk (90 MB, safely under the 100 MB edge limit). In DEBUG
-    /// builds a `CHUNK_SIZE_OVERRIDE` env var can shrink this so the chunked
-    /// path can be exercised without a multi-GB file.
+    /// Max bytes per chunk. Kept modest (20 MB) so each request's body stays
+    /// small in memory — well under Cloudflare's 100 MB cap and, combined with
+    /// streaming upload bodies from disk, avoiding the memory blow-up that was
+    /// OOM-killing the app on large videos. In DEBUG builds a `CHUNK_SIZE_OVERRIDE`
+    /// env var can shrink this further to exercise the chunked path in tests.
     static var chunkSize: Int {
         #if DEBUG
         if let raw = ProcessInfo.processInfo.environment["CHUNK_SIZE_OVERRIDE"], let value = Int(raw) {
             return value
         }
         #endif
-        return 90 * 1000 * 1000
+        return 20 * 1024 * 1024
     }
 }
 
