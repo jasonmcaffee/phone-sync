@@ -1,6 +1,7 @@
 import Foundation
 import Photos
 import CryptoKit
+import UIKit
 import os
 
 /// Coordinates backing up local media to the server. Owns per-asset sync
@@ -99,7 +100,13 @@ final class SyncEngine: ObservableObject {
         uploadSpeedMBps = 0
         runStart = Date()
         retryTask?.cancel()
-        defer { isSyncing = false; uploadSpeedMBps = 0 }
+        // Keep the screen awake so a long initial sync isn't paused by auto-lock.
+        UIApplication.shared.isIdleTimerDisabled = true
+        defer {
+            isSyncing = false
+            uploadSpeedMBps = 0
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
 
         await reconcile(assets: assets)
 
@@ -108,12 +115,20 @@ final class SyncEngine: ObservableObject {
         let byId = Dictionary(uniqueKeysWithValues: assets.map { ($0.localIdentifier, $0) })
         let todo = SyncDiff.notSynced(allAssetIds: assets.map { $0.localIdentifier }, manifest: manifest, records: records)
 
-        totalThisRun = todo.count
+        // Upload smallest items first so a few huge videos can't hold up
+        // hundreds of quick photos.
+        let sizeByID = Dictionary(uniqueKeysWithValues: todo.compactMap { id -> (String, Int64)? in
+            guard let asset = byId[id] else { return nil }
+            return (id, photoService.estimatedByteSize(for: asset))
+        })
+        let ordered = todo.sorted { (sizeByID[$0] ?? .max) < (sizeByID[$1] ?? .max) }
+
+        totalThisRun = ordered.count
         uploadedThisRun = 0
-        log.notice("sync start: \(todo.count, privacy: .public) item(s) to upload")
+        log.notice("sync start: \(ordered.count, privacy: .public) item(s), smallest first")
 
         var consecutiveFailures = 0
-        for assetId in todo {
+        for assetId in ordered {
             guard let asset = byId[assetId] else { continue }
             switch await uploadOne(asset: asset, token: token) {
             case .success, .assetError:

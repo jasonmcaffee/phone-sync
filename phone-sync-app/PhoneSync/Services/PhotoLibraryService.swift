@@ -130,6 +130,22 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
         return ExportedFile(url: tmpURL, filename: resource.originalFilename, contentType: contentType, mediaType: mediaType, size: size)
     }
 
+    /// Best-effort byte size of an asset's primary resource, used to sync the
+    /// smallest items first. Reads the resource's `fileSize` (metadata only, no
+    /// data transfer); falls back to a heuristic so photos still sort ahead of
+    /// videos and shorter videos ahead of longer ones when size is unavailable.
+    func estimatedByteSize(for asset: PHAsset) -> Int64 {
+        let resources = PHAssetResource.assetResources(for: asset)
+        if let resource = primaryResource(from: resources, mediaType: asset.mediaType),
+           let size = (resource.value(forKey: "fileSize") as? NSNumber)?.int64Value {
+            return size
+        }
+        if asset.mediaType == .video {
+            return Int64(max(1, asset.duration)) * 5_000_000 // ~5 MB per second
+        }
+        return Int64(asset.pixelWidth) * Int64(asset.pixelHeight) // rough photo proxy
+    }
+
     /// Picks the best resource to upload for the given media type.
     private func primaryResource(from resources: [PHAssetResource], mediaType: PHAssetMediaType) -> PHAssetResource? {
         if mediaType == .video {
