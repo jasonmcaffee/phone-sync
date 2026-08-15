@@ -113,13 +113,32 @@ pub struct MediaListItem {
     pub rel_path: String,
     /// True if the server can render an image thumbnail for this item.
     pub thumbnailable: bool,
+    /// True if a browser can display the *original* bytes directly. False for
+    /// HEIC, which is most of this library — those must go through `/preview`.
+    pub browser_displayable: bool,
+    /// The MIME type `/media/:id` will serve these bytes as, which differs from
+    /// the uploaded type for iPhone video (see `storage::served_content_type`).
+    pub served_content_type: String,
 }
 
-/// The gallery listing response, newest first.
+/// One page of the gallery listing, newest first.
 #[derive(Debug, Serialize)]
 pub struct MediaListResponse {
     pub items: Vec<MediaListItem>,
+    /// Total number of items in the library, not just this page.
     pub count: usize,
+    /// Offset this page started at.
+    pub offset: usize,
+    /// Maximum number of items this page could contain.
+    pub limit: usize,
+}
+
+/// Paging parameters for the gallery listing. Both are optional so an old client
+/// (or a hand-typed URL) still gets a sensible first page.
+#[derive(Debug, Deserialize)]
+pub struct PageQuery {
+    pub offset: Option<usize>,
+    pub limit: Option<usize>,
 }
 
 // MARK: - Chunked upload (large videos exceeding Cloudflare's 100 MB body cap)

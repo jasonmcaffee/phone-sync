@@ -19,6 +19,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime};
 use sha2::{Digest, Sha256};
 
+use crate::imaging::{self, MediaTools};
 use crate::models::{MediaRecord, StorageRoot};
 
 /// Makes each atomic-write temp filename unique within the process.
@@ -50,6 +51,7 @@ impl Storage {
         std::fs::create_dir_all(&media_root).context("creating media root")?;
         std::fs::create_dir_all(data_dir.join("index")).context("creating index dir")?;
         std::fs::create_dir_all(data_dir.join("thumbs")).context("creating thumbs dir")?;
+        std::fs::create_dir_all(data_dir.join("previews")).context("creating previews dir")?;
         let index = load_index(&data_dir).unwrap_or_default();
         Ok(Self {
             data_dir,
@@ -75,17 +77,41 @@ impl Storage {
             .cloned()
     }
 
-    /// Returns all stored records, newest first (by capture time), for the
-    /// web gallery listing.
+    /// Returns all stored records, newest first (by capture time). Used by the
+    /// startup backfill; request paths should page with [`Self::records_page`]
+    /// rather than cloning the whole library per request.
     pub fn all_records(&self) -> Vec<MediaRecord> {
         let mut records: Vec<MediaRecord> = self.index.lock().unwrap().values().cloned().collect();
         records.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         records
     }
 
+    /// Returns one page of records, newest first, plus the total library size.
+    ///
+    /// The gallery has thousands of items and a 71 GB library behind it; sending
+    /// the whole index on every load is what made the page slow to first paint.
+    /// Ordering is by capture time with the content hash as a tiebreak, so paging
+    /// is stable when a burst of photos shares a timestamp — without that, an
+    /// item can appear on two pages or on none.
+    /// @param offset - how many items to skip
+    /// @param limit - maximum number of items to return
+    pub fn records_page(&self, offset: usize, limit: usize) -> (Vec<MediaRecord>, usize) {
+        let index = self.index.lock().unwrap();
+        let total = index.len();
+        let mut ordered: Vec<&MediaRecord> = index.values().collect();
+        ordered.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| b.sha256.cmp(&a.sha256)));
+        let page = ordered.into_iter().skip(offset).take(limit).cloned().collect();
+        (page, total)
+    }
+
     /// Path of the cached JPEG thumbnail for a content hash.
     fn thumb_path(&self, sha256: &str) -> PathBuf {
         self.data_dir.join("thumbs").join(format!("{}.jpg", sha256))
+    }
+
+    /// Path of the cached full-screen JPEG preview for a content hash.
+    fn preview_path(&self, sha256: &str) -> PathBuf {
+        self.data_dir.join("previews").join(format!("{}.jpg", sha256))
     }
 
     /// True if a thumbnail (client-uploaded or previously generated) exists.
@@ -103,36 +129,43 @@ impl Storage {
         write_atomic(&self.thumb_path(sha256), jpeg).context("writing thumbnail")
     }
 
-    /// Returns a thumbnail for a record, generating and caching it on first use:
-    ///   cached JPEG → image-crate decode (JPEG/PNG/…) → ffmpeg (HEIC/video).
-    /// None only if every path fails (e.g. HEIC/video and ffmpeg unavailable).
+    /// Returns the grid thumbnail for a record, generating and caching it on
+    /// first use. None only if the file cannot be decoded at all.
     /// @param record - the media record to thumbnail
-    /// @param ffmpeg - path to the ffmpeg binary for formats the image crate can't decode
-    pub fn thumbnail_bytes(&self, record: &MediaRecord, ffmpeg: &str) -> Option<Vec<u8>> {
-        let cache_path = self.thumb_path(&record.sha256);
-        if let Ok(bytes) = std::fs::read(&cache_path) {
+    /// @param tools - resolved ffmpeg/ffprobe paths
+    /// @param max_dim - longest-edge size of the thumbnail
+    pub fn thumbnail_bytes(&self, record: &MediaRecord, tools: &MediaTools, max_dim: u32) -> Option<Vec<u8>> {
+        self.cached_render(&self.thumb_path(&record.sha256), record, tools, max_dim)
+    }
+
+    /// Returns a full-screen JPEG rendition for a record, generating and caching
+    /// it on first use. This is what the lightbox shows for HEIC, which no
+    /// browser can decode — the original bytes are still downloadable.
+    /// @param record - the media record to render
+    /// @param tools - resolved ffmpeg/ffprobe paths
+    /// @param max_dim - longest-edge size of the preview
+    pub fn preview_bytes(&self, record: &MediaRecord, tools: &MediaTools, max_dim: u32) -> Option<Vec<u8>> {
+        self.cached_render(&self.preview_path(&record.sha256), record, tools, max_dim)
+    }
+
+    /// Serves `cache_path` if it exists, otherwise renders the record at
+    /// `max_dim` and caches the result before returning it.
+    ///
+    /// A JPEG/PNG small enough to decode in-process takes the pure-Rust path;
+    /// everything else (HEIC tile grids, videos) goes to ffmpeg. A failed cache
+    /// write is not fatal — the render is still returned, it just isn't kept.
+    fn cached_render(&self, cache_path: &Path, record: &MediaRecord, tools: &MediaTools, max_dim: u32) -> Option<Vec<u8>> {
+        if let Ok(bytes) = std::fs::read(cache_path) {
             return Some(bytes);
         }
         let source = self.absolute_path(record);
-
-        let generated = if is_thumbnailable(&record.content_type, &record.filename) {
-            std::fs::read(&source)
-                .ok()
-                .and_then(|original| image::load_from_memory(&original).ok())
-                .and_then(|image| {
-                    let thumb = image.thumbnail(512, 512);
-                    let mut buf = std::io::Cursor::new(Vec::new());
-                    thumb.write_to(&mut buf, image::ImageFormat::Jpeg).ok()?;
-                    Some(buf.into_inner())
-                })
+        let rendered = if record.media_type == "video" {
+            imaging::render_video_frame(tools, &source, max_dim)
         } else {
-            // HEIC stills and videos — decode a frame with ffmpeg.
-            ffmpeg_thumbnail(ffmpeg, &source, &record.media_type)
-        };
-
-        let bytes = generated?;
-        let _ = write_atomic(&cache_path, &bytes);
-        Some(bytes)
+            imaging::render_still(tools, &source, max_dim)
+        }?;
+        let _ = write_atomic(cache_path, &rendered);
+        Some(rendered)
     }
 
     /// Resolves the absolute path of a record's bytes on disk, honoring which
@@ -353,63 +386,52 @@ impl Storage {
     }
 }
 
-/// Generates a ~512px-wide JPEG thumbnail by shelling out to ffmpeg, for the
-/// formats the pure-Rust image crate can't decode: HEIC stills and video frames.
-/// For videos it seeks ~1s in for a representative frame, falling back to the
-/// first frame for very short clips. Returns None if ffmpeg is missing or fails.
-/// @param ffmpeg - path to the ffmpeg binary
-/// @param source - the media file to thumbnail
-/// @param media_type - "photo" or "video"
-fn ffmpeg_thumbnail(ffmpeg: &str, source: &Path, media_type: &str) -> Option<Vec<u8>> {
-    let ticket = TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let out = std::env::temp_dir().join(format!("psync-thumb-{}-{ticket}.jpg", std::process::id()));
+/// Reports whether a browser can display the stored bytes directly.
+///
+/// The gallery uses this to decide between linking the original and linking the
+/// server-rendered preview. HEIC is the reason it exists: 1,797 of the photos in
+/// this library are HEIC and no browser decodes it, so pointing an `<img>` at
+/// the original is a guaranteed broken image. AVIF is listed as displayable —
+/// every current browser handles it — while TIFF and HEIC are not.
+/// @param content_type - the MIME type recorded at upload
+/// @param filename - the original filename, used when the MIME type is generic
+pub fn is_browser_displayable(content_type: &str, filename: &str) -> bool {
+    const DISPLAYABLE_TYPES: [&str; 5] = ["image/jpeg", "image/png", "image/gif", "image/webp", "image/avif"];
+    const DISPLAYABLE_EXTENSIONS: [&str; 6] = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif"];
 
-    // Decode a single full-resolution frame with no `-vf`: HEIC stills are
-    // decoded through an internal complex filtergraph on some ffmpeg builds,
-    // which conflicts with a simple `-vf scale`. We downscale afterwards with
-    // the image crate instead, which works for the JPEG ffmpeg emits.
-    let run = |seek: Option<&str>| -> bool {
-        let mut cmd = std::process::Command::new(ffmpeg);
-        cmd.arg("-y").arg("-loglevel").arg("error");
-        if let Some(s) = seek {
-            cmd.arg("-ss").arg(s);
-        }
-        cmd.arg("-i").arg(source).arg("-frames:v").arg("1").arg(&out);
-        matches!(cmd.output(), Ok(o) if o.status.success())
-            && std::fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false)
-    };
-
-    let ok = if media_type == "video" {
-        run(Some("00:00:01")) || run(None)
-    } else {
-        run(None)
-    };
-    if !ok {
-        let _ = std::fs::remove_file(&out);
-        return None;
-    }
-
-    let full = std::fs::read(&out).ok();
-    let _ = std::fs::remove_file(&out);
-    let image = image::load_from_memory(&full?).ok()?;
-    let thumb = image.thumbnail(512, 512);
-    let mut buf = std::io::Cursor::new(Vec::new());
-    thumb.write_to(&mut buf, image::ImageFormat::Jpeg).ok()?;
-    Some(buf.into_inner())
-}
-
-/// Reports whether an item can be decoded into an image thumbnail by the
-/// pure-Rust `image` crate (JPEG/PNG/GIF/WebP/BMP/TIFF). HEIC and videos are
-/// handled via ffmpeg instead.
-pub fn is_thumbnailable(content_type: &str, filename: &str) -> bool {
-    let ct = content_type.to_lowercase();
-    if ct == "image/jpeg" || ct == "image/png" || ct == "image/gif" || ct == "image/webp" || ct == "image/bmp" || ct == "image/tiff" {
+    let content_type = content_type.to_lowercase();
+    if DISPLAYABLE_TYPES.contains(&content_type.as_str()) {
         return true;
     }
+    // A generic content type (some uploads arrive as application/octet-stream)
+    // still tells us nothing, so fall back to the name the phone gave the file.
     let name = filename.to_lowercase();
-    [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff"]
-        .iter()
-        .any(|ext| name.ends_with(ext))
+    DISPLAYABLE_EXTENSIONS.iter().any(|ext| name.ends_with(ext))
+}
+
+/// Maps a stored item to the MIME type it should be *served* as, which is not
+/// always the one it was uploaded with.
+///
+/// iPhone clips are HEVC in a QuickTime container and arrive as
+/// `video/quicktime`. That container is ISO-BMFF — the same family as MP4, which
+/// is why ffprobe reports it as `mov,mp4,m4a,...` and why the bytes need no
+/// conversion, only an honest label.
+///
+/// Measured on this library: Chromium decodes such a clip under *either* type
+/// when it is set as a `<video src>`, because it sniffs the container rather
+/// than trusting the header — so this mapping is not what makes playback work
+/// (streaming is). What it does buy is the declarative paths: `canPlayType`
+/// reports `""` for `video/quicktime`, so any `<source type="...">` check, media
+/// query or client that asks before fetching would rule the file out before
+/// trying it. Serving the accurate MP4 type keeps those honest and costs Safari,
+/// which plays either, nothing.
+/// @param record - the record whose bytes are being served
+pub fn served_content_type(record: &MediaRecord) -> &str {
+    match record.content_type.to_lowercase().as_str() {
+        "video/quicktime" => "video/mp4",
+        "" | "application/octet-stream" if record.media_type == "video" => "video/mp4",
+        _ => &record.content_type,
+    }
 }
 
 /// Streams chunks `0..total_chunks` into `destination`, one at a time so a

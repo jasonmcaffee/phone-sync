@@ -32,6 +32,31 @@ pub struct Config {
     /// image decoder can't handle (HEIC stills and video frames). Defaults to
     /// `ffmpeg` on PATH; set `PHONE_SYNC_FFMPEG` to an absolute path otherwise.
     pub ffmpeg_path: String,
+    /// Path to the `ffprobe` binary. Required as well as ffmpeg: it is what
+    /// reports an iPhone HEIC's tile-grid layout, without which the photo cannot
+    /// be reassembled. Defaults to `ffprobe` on PATH.
+    pub ffprobe_path: String,
+    /// Longest-edge size of the cached grid thumbnails.
+    pub thumbnail_max_dim: u32,
+    /// Longest-edge size of the cached full-screen previews served for formats
+    /// browsers can't display natively (HEIC).
+    pub preview_max_dim: u32,
+    /// How many library items a single `/api/media` page returns by default.
+    pub default_page_size: usize,
+    /// Upper bound on a caller-requested page size.
+    pub max_page_size: usize,
+    /// How many thumbnails the startup backfill generates concurrently.
+    pub thumbnail_workers: usize,
+}
+
+impl Config {
+    /// Bundles the external decoder paths for the imaging layer.
+    pub fn media_tools(&self) -> crate::imaging::MediaTools {
+        crate::imaging::MediaTools {
+            ffmpeg: self.ffmpeg_path.clone(),
+            ffprobe: self.ffprobe_path.clone(),
+        }
+    }
 }
 
 /// Builds the configuration from environment variables, falling back to
@@ -70,9 +95,29 @@ pub fn load() -> Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(2 * 1024 * 1024 * 1024),
         ffmpeg_path: std::env::var("PHONE_SYNC_FFMPEG").unwrap_or_else(|_| "ffmpeg".to_string()),
+        ffprobe_path: std::env::var("PHONE_SYNC_FFPROBE").unwrap_or_else(|_| "ffprobe".to_string()),
+        thumbnail_max_dim: parsed_env("PHONE_SYNC_THUMB_MAX_DIM", 512),
+        preview_max_dim: parsed_env("PHONE_SYNC_PREVIEW_MAX_DIM", 2048),
+        default_page_size: parsed_env("PHONE_SYNC_PAGE_SIZE", 120),
+        max_page_size: parsed_env("PHONE_SYNC_MAX_PAGE_SIZE", 500),
+        // Thumbnailing is ffmpeg subprocess work, so it scales with cores rather
+        // than being run one-at-a-time; capped so a backfill of thousands of
+        // photos can't starve the box it shares with everything else.
+        thumbnail_workers: std::env::var("PHONE_SYNC_THUMB_WORKERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get() / 2).unwrap_or(2).clamp(1, 8)),
         data_dir,
         media_root,
     }
+}
+
+/// Reads a numeric environment variable, falling back to a default when it is
+/// unset or unparseable.
+/// @param key - the environment variable name
+/// @param fallback - value used when the variable is absent or invalid
+fn parsed_env<T: std::str::FromStr>(key: &str, fallback: T) -> T {
+    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(fallback)
 }
 
 /// Resolves the JWT signing secret: an explicit `PHONE_SYNC_JWT_SECRET` wins,

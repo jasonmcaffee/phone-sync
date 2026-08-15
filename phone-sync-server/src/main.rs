@@ -32,35 +32,7 @@ async fn main() -> anyhow::Result<()> {
         storage: Arc::new(storage),
     };
 
-    // Background: pre-generate thumbnails for the whole library so the web UI is
-    // fast even for years of existing photos/videos. Skips items already cached,
-    // so it's cheap on subsequent restarts.
-    {
-        let storage = state.storage.clone();
-        let ffmpeg = state.config.ffmpeg_path.clone();
-        tokio::spawn(async move {
-            let records = storage.all_records();
-            let mut made = 0usize;
-            for record in records {
-                if storage.has_thumbnail(&record.sha256) {
-                    continue;
-                }
-                let (s, f) = (storage.clone(), ffmpeg.clone());
-                if tokio::task::spawn_blocking(move || s.thumbnail_bytes(&record, &f))
-                    .await
-                    .ok()
-                    .flatten()
-                    .is_some()
-                {
-                    made += 1;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            }
-            if made > 0 {
-                tracing::info!("thumbnail pre-generation complete: {made} generated");
-            }
-        });
-    }
+    tokio::spawn(backfill_thumbnails(state.clone()));
 
     let bind_addr = state.config.bind_addr.clone();
     let app = build_app(state);
@@ -69,6 +41,69 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("phone-sync-server listening on {bind_addr}");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Generates every missing grid thumbnail in the background so the gallery is
+/// instant even on the first visit after a restart.
+///
+/// This matters at the library's real size: 2,700 items of which the vast
+/// majority are HEIC, each needing ffmpeg to reassemble a 48-tile grid at around
+/// half a second apiece. Run one at a time that is over twenty minutes of an
+/// empty-looking grid, so a small pool of workers shares the queue — bounded, so
+/// a backfill can't monopolise a machine that is also running everything else.
+/// Items already cached are skipped, making a restart nearly free.
+/// @param state - shared application state
+async fn backfill_thumbnails(state: AppState) {
+    let pending: Vec<_> = state
+        .storage
+        .all_records()
+        .into_iter()
+        .filter(|record| !state.storage.has_thumbnail(&record.sha256))
+        .collect();
+    if pending.is_empty() {
+        return;
+    }
+
+    let workers = state.config.thumbnail_workers.max(1);
+    let total = pending.len();
+    tracing::info!("thumbnail backfill: {total} missing, {workers} workers");
+
+    let queue = Arc::new(std::sync::Mutex::new(pending.into_iter()));
+    let generated = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let failed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let mut handles = Vec::with_capacity(workers);
+    for _ in 0..workers {
+        let (queue, generated, failed) = (queue.clone(), generated.clone(), failed.clone());
+        let storage = state.storage.clone();
+        let tools = state.config.media_tools();
+        let max_dim = state.config.thumbnail_max_dim;
+        handles.push(tokio::task::spawn_blocking(move || loop {
+            let Some(record) = queue.lock().unwrap().next() else {
+                return;
+            };
+            match storage.thumbnail_bytes(&record, &tools, max_dim) {
+                Some(_) => {
+                    let done = generated.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    if done % 250 == 0 {
+                        tracing::info!("thumbnail backfill: {done}/{total}");
+                    }
+                }
+                None => {
+                    failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tracing::warn!("could not thumbnail {} ({})", record.filename, record.rel_path);
+                }
+            }
+        }));
+    }
+    for handle in handles {
+        let _ = handle.await;
+    }
+    tracing::info!(
+        "thumbnail backfill complete: {} generated, {} failed",
+        generated.load(std::sync::atomic::Ordering::Relaxed),
+        failed.load(std::sync::atomic::Ordering::Relaxed)
+    );
 }
 
 /// Binds the listener, retrying briefly while the address is still in use.

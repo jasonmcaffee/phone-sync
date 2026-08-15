@@ -16,6 +16,10 @@ DerivedData/
 # Node
 node_modules/
 
+# Vendored ffmpeg/ffprobe used only by this service (fetch-ffmpeg.cmd downloads
+# them). ~200 MB of binaries that don't belong in git.
+tools/
+
 # JetBrains IDE
 .idea/
 *.iml

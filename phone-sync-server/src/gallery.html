@@ -21,7 +21,8 @@
   header {
     position: sticky; top: 0; z-index: 5;
     display: flex; align-items: center; gap: 12px;
-    padding: 14px 18px; background: rgba(13,15,18,.85);
+    padding: 14px 18px; padding-top: max(14px, env(safe-area-inset-top));
+    background: rgba(13,15,18,.85);
     backdrop-filter: blur(10px); border-bottom: 1px solid var(--line);
   }
   header h1 { font-size: 17px; margin: 0; font-weight: 600; }
@@ -35,15 +36,23 @@
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
 
   /* Grid */
+  .month {
+    grid-column: 1 / -1; padding: 18px 6px 6px;
+    font-size: 13px; font-weight: 600; color: var(--muted); letter-spacing: .3px;
+  }
   #grid {
     display: grid; gap: 3px; padding: 3px;
-    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
   }
+  @media (min-width: 720px) { #grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); } }
   .tile {
     position: relative; aspect-ratio: 1; background: var(--panel);
     overflow: hidden; cursor: pointer; border-radius: 2px;
   }
-  .tile img, .tile video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .tile img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  /* Thumbnails fade in so the grid doesn't flash white boxes while paging. */
+  .tile img { opacity: 0; transition: opacity .18s ease; }
+  .tile img.ready { opacity: 1; }
   .tile .fallback {
     width: 100%; height: 100%; display: flex; flex-direction: column;
     align-items: center; justify-content: center; gap: 6px; color: var(--muted);
@@ -55,26 +64,38 @@
     font-size: 11px; font-weight: 600; background: rgba(0,0,0,.55); color: #fff;
   }
   .badge.type { left: 6px; top: 6px; display: flex; align-items: center; gap: 4px; }
+  .badge.dur { right: 6px; bottom: 6px; }
   .tile .play {
     position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
     pointer-events: none;
   }
-  .tile .play svg { width: 42px; height: 42px; filter: drop-shadow(0 1px 3px rgba(0,0,0,.6)); opacity: .95; }
+  .tile .play svg { width: 38px; height: 38px; filter: drop-shadow(0 1px 3px rgba(0,0,0,.6)); opacity: .95; }
+
+  /* Paging */
+  #sentinel { height: 1px; }
+  #paging { text-align: center; color: var(--muted); font-size: 13px; padding: 22px 12px 40px; }
+  .spinner {
+    display: inline-block; width: 16px; height: 16px; vertical-align: -3px; margin-right: 8px;
+    border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%;
+    animation: spin .7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
 
   /* Lightbox */
   #lightbox {
     position: fixed; inset: 0; z-index: 20; display: none;
-    align-items: center; justify-content: center; background: rgba(0,0,0,.92);
+    align-items: center; justify-content: center; background: rgba(0,0,0,.94);
   }
   #lightbox.open { display: flex; }
   #lightbox .stage {
-    max-width: 94vw; max-height: 88vh; display: flex; align-items: center; justify-content: center;
+    max-width: 96vw; max-height: 88vh; display: flex; align-items: center; justify-content: center;
   }
-  #lightbox img, #lightbox video { max-width: 94vw; max-height: 88vh; border-radius: 6px; }
-  #lightbox .lb-fallback { color: var(--muted); text-align: center; max-width: 420px; padding: 20px; }
+  #lightbox img, #lightbox video { max-width: 96vw; max-height: 88vh; border-radius: 6px; }
+  #lightbox .lb-fallback { color: var(--muted); text-align: center; max-width: 460px; padding: 20px; line-height: 1.6; }
   #lightbox .lb-fallback a { color: var(--accent); }
+  #lightbox .lb-fallback .why { font-size: 13px; color: var(--muted); margin-top: 10px; }
   .lb-btn {
-    position: absolute; top: 16px; background: rgba(30,33,40,.7);
+    position: absolute; top: max(16px, env(safe-area-inset-top)); background: rgba(30,33,40,.7);
     border: 1px solid var(--line); width: 42px; height: 42px; border-radius: 50%;
     display: flex; align-items: center; justify-content: center; font-size: 20px;
   }
@@ -87,9 +108,9 @@
   }
   #lb-prev { left: 16px; } #lb-next { right: 16px; }
   .lb-caption {
-    position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%);
+    position: absolute; bottom: max(18px, env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%);
     color: var(--muted); font-size: 13px; background: rgba(30,33,40,.6);
-    padding: 6px 12px; border-radius: 20px; max-width: 80vw; white-space: nowrap;
+    padding: 6px 12px; border-radius: 20px; max-width: 84vw; white-space: nowrap;
     overflow: hidden; text-overflow: ellipsis;
   }
 
@@ -122,6 +143,8 @@
   </header>
 
   <div id="grid"></div>
+  <div id="sentinel"></div>
+  <div id="paging"></div>
   <div class="empty" id="empty" style="display:none">No media has been synced yet.</div>
 
   <!-- Lightbox -->
@@ -147,22 +170,53 @@
 
 <script>
 const TOKEN_KEY = "phonesync_token";
+// One screenful plus a comfortable buffer. The library runs to thousands of
+// items and tens of gigabytes, so the grid is filled a page at a time as you
+// scroll rather than waiting on one enormous listing.
+const PAGE_SIZE = 120;
+
 let token = localStorage.getItem(TOKEN_KEY);
-let items = [];
+let items = [];          // everything loaded so far, newest first
+let total = 0;           // library size reported by the server
+let loading = false;     // a page request is in flight
+let exhausted = false;   // every page has been loaded
+let lastMonthLabel = null;
 let current = -1;
 
 const $ = (id) => document.getElementById(id);
 
 /** Builds an authenticated media URL (token as query param for <img>/<video>). */
 function mediaURL(id, kind) {
-  const path = kind === "thumb" ? `/media/${id}/thumb` : `/media/${id}`;
-  return `${path}?token=${encodeURIComponent(token)}`;
+  const suffix = kind ? `/${kind}` : "";
+  return `/media/${id}${suffix}?token=${encodeURIComponent(token)}`;
 }
 
-/** Uppercased file extension for fallback tiles. */
+/**
+ * Picks the URL that will actually render in a browser for a full-screen view.
+ * HEIC is most of this library and no browser decodes it, so those go to the
+ * server-rendered JPEG preview; anything a browser handles natively is served
+ * as its original bytes at full quality.
+ */
+function displayURL(item) {
+  return item.browser_displayable ? mediaURL(item.id) : mediaURL(item.id, "preview");
+}
+
+/** Uppercased file extension, for fallback tiles and messages. */
 function ext(filename) {
   const dot = filename.lastIndexOf(".");
   return dot >= 0 ? filename.slice(dot + 1).toUpperCase() : "FILE";
+}
+
+/** "August 2026" heading for an item's capture date, used to group the grid. */
+function monthLabel(createdAt) {
+  const date = new Date(createdAt);
+  if (isNaN(date)) return "Undated";
+  return date.toLocaleString(undefined, { month: "long", year: "numeric" });
+}
+
+/** Human-readable size for the lightbox caption. */
+function megabytes(bytes) {
+  return bytes >= 1073741824 ? `${(bytes / 1073741824).toFixed(2)} GB` : `${(bytes / 1048576).toFixed(1)} MB`;
 }
 
 /** Signs in against the backend and stores the returned token. */
@@ -185,22 +239,80 @@ function logout() {
   $("login").style.display = "flex";
 }
 
-/** Loads the media list and renders the grid. Handles auth failures. */
-async function loadLibrary() {
-  const res = await fetch("/api/media", { headers: { Authorization: `Bearer ${token}` } });
-  if (res.status === 401) { logout(); return; }
-  const data = await res.json();
-  items = data.items || [];
-  $("count").textContent = items.length ? `${items.length} items` : "";
-  $("empty").style.display = items.length ? "none" : "block";
-  renderGrid();
+/** Throws the grid away and reloads from the first page. */
+async function reload() {
+  items = [];
+  total = 0;
+  exhausted = false;
+  lastMonthLabel = null;
+  $("grid").innerHTML = "";
+  await loadNextPage();
 }
 
-/** Renders all tiles into the grid. */
-function renderGrid() {
-  const grid = $("grid");
-  grid.innerHTML = "";
-  items.forEach((item, index) => grid.appendChild(makeTile(item, index)));
+/**
+ * Fetches the next page of the library and appends it to the grid. Guarded so
+ * overlapping scroll events can't request the same page twice.
+ */
+async function loadNextPage() {
+  if (loading || exhausted || !token) return;
+  loading = true;
+  $("paging").innerHTML = `<span class="spinner"></span>Loading…`;
+
+  try {
+    const res = await fetch(`/api/media?offset=${items.length}&limit=${PAGE_SIZE}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (res.status === 401) { logout(); return; }
+    if (!res.ok) throw new Error(`listing failed (${res.status})`);
+
+    const data = await res.json();
+    total = data.count || 0;
+    const page = data.items || [];
+    const firstIndex = items.length;
+    items = items.concat(page);
+    appendTiles(page, firstIndex);
+
+    // Trust the count, but stop on a short page too, so a listing that shrinks
+    // underneath us can't spin forever.
+    exhausted = items.length >= total || page.length === 0;
+    $("count").textContent = total ? `${items.length.toLocaleString()} of ${total.toLocaleString()}` : "";
+    $("empty").style.display = total ? "none" : "block";
+    $("paging").textContent = exhausted ? (total ? "End of library" : "") : "";
+  } catch (err) {
+    $("paging").innerHTML = `Couldn't load more — <button id="retry">retry</button>`;
+    $("retry").onclick = () => { $("paging").textContent = ""; loadNextPage(); };
+    return;
+  } finally {
+    loading = false;
+  }
+
+  // A short first page may not reach the sentinel, so keep going until the
+  // viewport is actually covered.
+  if (!exhausted && $("sentinel").getBoundingClientRect().top < window.innerHeight * 2) {
+    loadNextPage();
+  }
+}
+
+/**
+ * Appends one page of tiles, inserting a month heading when the month changes.
+ * @param page - the items just fetched, already concatenated onto `items`
+ * @param firstIndex - index of `page[0]` within `items`, so a tile can open the
+ *                     lightbox at the right position in the whole library
+ */
+function appendTiles(page, firstIndex) {
+  const fragment = document.createDocumentFragment();
+  page.forEach((item, i) => {
+    const label = monthLabel(item.created_at);
+    if (label !== lastMonthLabel) {
+      lastMonthLabel = label;
+      const heading = document.createElement("div");
+      heading.className = "month";
+      heading.textContent = label;
+      fragment.appendChild(heading);
+    }
+    fragment.appendChild(makeTile(item, firstIndex + i));
+  });
+  $("grid").appendChild(fragment);
 }
 
 /** Creates a single grid tile for an item. */
@@ -209,11 +321,14 @@ function makeTile(item, index) {
   tile.className = "tile";
   tile.onclick = () => openLightbox(index);
 
-  // The server thumbnails every format now (ffmpeg for HEIC/video), so a plain
-  // <img> pointed at the thumbnail works for all items.
+  // The server thumbnails every format (ffmpeg reassembles HEIC tile grids and
+  // grabs a video frame), so a plain <img> works for everything in the library.
   const img = document.createElement("img");
   img.loading = "lazy";
+  img.decoding = "async";
+  img.alt = item.filename;
   img.src = mediaURL(item.id, "thumb");
+  img.onload = () => img.classList.add("ready");
   img.onerror = () => {
     tile.innerHTML = fallbackHTML(item);
     if (item.media_type === "video") tile.insertAdjacentHTML("beforeend", videoBadgeHTML());
@@ -232,7 +347,7 @@ function videoBadgeHTML() {
           <span class="play"><svg viewBox="0 0 24 24" fill="white"><path d="M8 5v14l11-7z"/></svg></span>`;
 }
 
-/** Fallback markup for undecodable images (e.g. HEIC). */
+/** Fallback markup for a tile whose thumbnail could not be rendered. */
 function fallbackHTML(item) {
   return `<div class="fallback"><span class="ext">${ext(item.filename)}</span><span>${item.filename}</span></div>`;
 }
@@ -247,6 +362,8 @@ function openLightbox(index) {
 /** Closes the lightbox and stops any playback. */
 function closeLightbox() {
   $("lightbox").classList.remove("open");
+  // Emptying the stage detaches the <video>, which cancels its in-flight range
+  // requests; without that a closed 4K clip keeps streaming in the background.
   $("lb-stage").innerHTML = "";
 }
 
@@ -256,30 +373,79 @@ function renderLightbox() {
   if (!item) return;
   const stage = $("lb-stage");
   stage.innerHTML = "";
-  // rel_path shows which <year>/<yyyymm>-phone-sync folder the item was filed into.
   const folder = item.rel_path ? ` · ${item.rel_path}` : "";
-  $("lb-caption").textContent = `${item.filename} · ${(item.size / 1048576).toFixed(1)} MB${folder}`;
-
-  if (item.media_type === "video") {
-    const v = document.createElement("video");
-    v.src = mediaURL(item.id); v.controls = true; v.autoplay = true; v.playsInline = true;
-    stage.appendChild(v);
-  } else {
-    const img = document.createElement("img");
-    img.src = mediaURL(item.id);
-    img.onerror = () => {
-      stage.innerHTML =
-        `<div class="lb-fallback">Can't preview <b>${ext(item.filename)}</b> in this browser.<br>
-         <a href="${mediaURL(item.id)}" download="${item.filename}">Download ${item.filename}</a></div>`;
-    };
-    stage.appendChild(img);
-  }
+  $("lb-caption").textContent = `${item.filename} · ${megabytes(item.size)}${folder}`;
+  stage.appendChild(item.media_type === "video" ? videoElement(item) : imageElement(item));
 }
 
-/** Moves to the previous/next item in the lightbox. */
+/**
+ * Builds the player for a video. The poster is the cached thumbnail so there is
+ * something on screen immediately, and `preload="metadata"` means pressing play
+ * pulls only the ranges needed rather than the whole file — which matters when
+ * the largest clip here is nearly 5 GB.
+ */
+function videoElement(item) {
+  const video = document.createElement("video");
+  video.src = mediaURL(item.id);
+  video.poster = mediaURL(item.id, "thumb");
+  video.controls = true;
+  video.autoplay = true;
+  video.playsInline = true;
+  video.preload = "metadata";
+  video.onerror = () => {
+    // iPhone clips are HEVC. Safari plays them; a browser without an HEVC
+    // decoder cannot, and says so here instead of showing a dead player.
+    $("lb-stage").innerHTML = unplayableHTML(item);
+  };
+  return video;
+}
+
+/** Builds the <img> for a still, falling back to the original bytes. */
+function imageElement(item) {
+  const img = document.createElement("img");
+  img.alt = item.filename;
+  img.src = displayURL(item);
+  img.onerror = () => {
+    // The rendered preview failed; the original may still be displayable.
+    if (!img.dataset.retried && !item.browser_displayable) {
+      img.dataset.retried = "1";
+      img.src = mediaURL(item.id);
+      return;
+    }
+    $("lb-stage").innerHTML = undisplayableHTML(item);
+  };
+  return img;
+}
+
+/** Message shown when the browser has no decoder for a video. */
+function unplayableHTML(item) {
+  return `<div class="lb-fallback">
+    <b>${item.filename}</b> won't play in this browser.
+    <div class="why">iPhone video is HEVC (H.265) in a QuickTime container. Safari plays it natively;
+    Chrome and Firefox need an HEVC decoder from the OS.</div>
+    <p><a href="${mediaURL(item.id)}" download="${item.filename}">Download ${item.filename}</a> (${megabytes(item.size)})</p>
+  </div>`;
+}
+
+/** Message shown when neither the preview nor the original can be displayed. */
+function undisplayableHTML(item) {
+  return `<div class="lb-fallback">
+    Can't preview <b>${ext(item.filename)}</b> in this browser.
+    <p><a href="${mediaURL(item.id)}" download="${item.filename}">Download ${item.filename}</a> (${megabytes(item.size)})</p>
+  </div>`;
+}
+
+/** Moves to the previous/next item, loading more of the library if needed. */
 function navigate(delta) {
-  if (current < 0) return;
-  current = (current + delta + items.length) % items.length;
+  if (current < 0 || !items.length) return;
+  const next = current + delta;
+  if (next >= items.length) {
+    // Walking off the end of what's loaded pulls the next page rather than
+    // wrapping around to the start of a library you haven't seen all of.
+    if (!exhausted) loadNextPage().then(() => { if (next < items.length) { current = next; renderLightbox(); } });
+    return;
+  }
+  current = (next + items.length) % items.length;
   renderLightbox();
 }
 
@@ -290,13 +456,13 @@ $("login-form").addEventListener("submit", async (e) => {
   try {
     await login($("username").value.trim(), $("password").value);
     $("login").style.display = "none";
-    await loadLibrary();
+    await reload();
   } catch (err) {
     $("login-err").textContent = err.message;
   }
 });
 $("logout").onclick = logout;
-$("refresh").onclick = loadLibrary;
+$("refresh").onclick = reload;
 $("lb-close").onclick = closeLightbox;
 $("lb-prev").onclick = () => navigate(-1);
 $("lb-next").onclick = () => navigate(1);
@@ -308,10 +474,15 @@ document.addEventListener("keydown", (e) => {
   else if (e.key === "ArrowRight") navigate(1);
 });
 
+// Infinite scroll: load the next page as the bottom of the grid approaches.
+new IntersectionObserver((entries) => {
+  if (entries.some((entry) => entry.isIntersecting)) loadNextPage();
+}, { rootMargin: "800px" }).observe($("sentinel"));
+
 // --- Bootstrap ---
 if (token) {
   $("login").style.display = "none";
-  loadLibrary();
+  reload();
 }
 </script>
 </body>

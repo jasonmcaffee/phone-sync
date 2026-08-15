@@ -5,7 +5,10 @@ pub mod auth;
 pub mod config;
 pub mod error;
 pub mod handlers;
+pub mod heif;
+pub mod imaging;
 pub mod models;
+pub mod orientation;
 pub mod state;
 pub mod storage;
 
@@ -32,6 +35,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/media", get(handlers::list_media))
         .route("/media/:id", get(handlers::get_media))
         .route("/media/:id/thumb", get(handlers::get_thumb).post(handlers::put_thumbnail))
+        .route("/media/:id/preview", get(handlers::get_preview))
         .layer(middleware::from_fn_with_state(state.clone(), auth::require_auth));
 
     // Public routes (the gallery page shell loads, then authenticates via JS).

@@ -27,6 +27,16 @@ set PHONE_SYNC_DATA_DIR=E:\phone-sync-data
 set PHONE_SYNC_USER=jason
 set RUST_LOG=info,tower_http=info
 
+REM Prefer the bundled ffmpeg when it has been fetched (fetch-ffmpeg.cmd). The
+REM release builds on PATH cannot open a HEIC whose primary item is a `tmap`
+REM derived image, which is what an iPhone writes for HDR stills - such a photo
+REM gets no thumbnail and no preview at all. Falls back to PATH when absent,
+REM which still handles every other format in the library.
+if exist "%~dp0tools\ffmpeg\bin\ffmpeg.exe" (
+  set PHONE_SYNC_FFMPEG=%~dp0tools\ffmpeg\bin\ffmpeg.exe
+  set PHONE_SYNC_FFPROBE=%~dp0tools\ffmpeg\bin\ffprobe.exe
+)
+
 set SERVER_DIR=%~dp0phone-sync-server
 set EXE=%SERVER_DIR%\target\release\phone-sync-server.exe
 

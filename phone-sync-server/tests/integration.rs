@@ -26,6 +26,12 @@ async fn spawn_server() -> (String, tempfile::TempDir) {
         token_ttl_secs: 365 * 24 * 60 * 60,
         max_upload_bytes: 10 * 1024 * 1024,
         ffmpeg_path: "ffmpeg".into(),
+        ffprobe_path: "ffprobe".into(),
+        thumbnail_max_dim: 512,
+        preview_max_dim: 2048,
+        default_page_size: 120,
+        max_page_size: 500,
+        thumbnail_workers: 2,
     };
     let storage = Storage::open(
         config.data_dir.clone(),
@@ -290,6 +296,165 @@ async fn media_supports_range_requests() {
     assert_eq!(resp.status(), 206);
     assert_eq!(resp.headers()["content-range"], format!("bytes 0-9/{total}"));
     assert_eq!(resp.bytes().await.unwrap().len(), 10);
+}
+
+#[tokio::test]
+async fn an_open_ended_range_streams_from_the_requested_offset() {
+    let (base, _tmp) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let token = login(&base, &client).await;
+
+    // Distinct bytes, so a wrong offset produces a wrong body rather than
+    // accidentally matching.
+    let content: Vec<u8> = (0..50_000u32).map(|i| (i % 251) as u8).collect();
+    let total = content.len();
+    let form = upload_form("stream-1", "VID.mp4", "video/mp4", "video", content.clone());
+    let up: Value = client.post(format!("{base}/media/upload")).bearer_auth(&token).multipart(form).send().await.unwrap().json().await.unwrap();
+    let id = up["id"].as_str().unwrap().to_string();
+
+    // The open-ended form a browser uses once it decides to keep playing.
+    let resp = client.get(format!("{base}/media/{id}")).bearer_auth(&token).header("Range", "bytes=10000-").send().await.unwrap();
+    assert_eq!(resp.status(), 206);
+    assert_eq!(resp.headers()["content-range"], format!("bytes 10000-{}/{total}", total - 1));
+    assert_eq!(resp.bytes().await.unwrap().to_vec(), content[10_000..], "streamed from the right offset");
+
+    // The two-byte probe Safari opens a video with.
+    let probe = client.get(format!("{base}/media/{id}")).bearer_auth(&token).header("Range", "bytes=0-1").send().await.unwrap();
+    assert_eq!(probe.status(), 206);
+    assert_eq!(probe.headers()["accept-ranges"], "bytes");
+    assert_eq!(probe.bytes().await.unwrap().to_vec(), content[..2]);
+
+    // A range past the end is refused, not silently answered with everything.
+    let beyond = client.get(format!("{base}/media/{id}")).bearer_auth(&token).header("Range", "bytes=999999-1000000").send().await.unwrap();
+    assert_eq!(beyond.status(), 416);
+    assert_eq!(beyond.headers()["content-range"], format!("bytes */{total}"));
+}
+
+#[tokio::test]
+async fn iphone_video_is_served_with_its_true_mp4_family_type() {
+    let (base, _tmp) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let token = login(&base, &client).await;
+
+    // Uploaded as video/quicktime, exactly as an iPhone .MOV arrives.
+    let form = upload_form("mov-1", "IMG_5424.MOV", "video/quicktime", "video", b"quicktime-bytes".to_vec());
+    let up: Value = client.post(format!("{base}/media/upload")).bearer_auth(&token).multipart(form).send().await.unwrap().json().await.unwrap();
+    let id = up["id"].as_str().unwrap().to_string();
+
+    let resp = client.get(format!("{base}/media/{id}")).bearer_auth(&token).send().await.unwrap();
+    assert_eq!(resp.headers()["content-type"], "video/mp4", "canPlayType reports nothing for video/quicktime");
+
+    // The listing tells the client the same thing up front.
+    let list: Value = client.get(format!("{base}/api/media")).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
+    let item = list["items"].as_array().unwrap().iter().find(|i| i["id"] == id).unwrap();
+    assert_eq!(item["served_content_type"], "video/mp4");
+    assert_eq!(item["content_type"], "video/quicktime", "the record keeps what was uploaded");
+}
+
+#[tokio::test]
+async fn media_is_cached_immutably_and_answers_conditional_requests() {
+    let (base, _tmp) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let token = login(&base, &client).await;
+
+    let png = make_png();
+    let form = upload_form("cache-1", "pic.png", "image/png", "photo", png);
+    let up: Value = client.post(format!("{base}/media/upload")).bearer_auth(&token).multipart(form).send().await.unwrap().json().await.unwrap();
+    let id = up["id"].as_str().unwrap().to_string();
+
+    for path in [format!("/media/{id}"), format!("/media/{id}/thumb"), format!("/media/{id}/preview")] {
+        let first = client.get(format!("{base}{path}")).bearer_auth(&token).send().await.unwrap();
+        assert_eq!(first.status(), 200, "{path}");
+        let cache_control = first.headers()["cache-control"].to_str().unwrap().to_string();
+        assert!(cache_control.contains("immutable"), "{path} should be immutable, got {cache_control}");
+        let etag = first.headers()["etag"].to_str().unwrap().to_string();
+
+        // Re-requesting with the tag we were given costs nothing.
+        let again = client.get(format!("{base}{path}")).bearer_auth(&token).header("If-None-Match", &etag).send().await.unwrap();
+        assert_eq!(again.status(), 304, "{path} should be a cache hit");
+        assert!(again.bytes().await.unwrap().is_empty());
+    }
+
+    // The original and its renditions must not share an ETag, or a cache could
+    // serve a thumbnail in place of the full image.
+    let tag_of = |path: String| {
+        let client = client.clone();
+        let base = base.clone();
+        let token = token.clone();
+        async move {
+            client.get(format!("{base}{path}")).bearer_auth(&token).send().await.unwrap().headers()["etag"].to_str().unwrap().to_string()
+        }
+    };
+    let original = tag_of(format!("/media/{id}")).await;
+    let thumb = tag_of(format!("/media/{id}/thumb")).await;
+    let preview = tag_of(format!("/media/{id}/preview")).await;
+    assert_ne!(original, thumb);
+    assert_ne!(thumb, preview);
+}
+
+#[tokio::test]
+async fn the_listing_is_paged_newest_first() {
+    let (base, _tmp) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let token = login(&base, &client).await;
+
+    // Twelve captures on consecutive days, uploaded oldest-first.
+    for day in 1..=12u32 {
+        let created_at = format!("2026-03-{day:02}T12:00:00Z");
+        let form = upload_form_at(&format!("page-{day}"), &format!("IMG_{day:04}.jpg"), "image/jpeg", "photo", &created_at, format!("bytes-{day}").into_bytes());
+        client.post(format!("{base}/media/upload")).bearer_auth(&token).multipart(form).send().await.unwrap();
+    }
+
+    let page_one: Value = client.get(format!("{base}/api/media?offset=0&limit=5")).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
+    assert_eq!(page_one["count"], 12, "count is the whole library, not the page");
+    assert_eq!(page_one["offset"], 0);
+    assert_eq!(page_one["limit"], 5);
+    assert_eq!(page_one["items"].as_array().unwrap().len(), 5);
+    assert_eq!(page_one["items"][0]["filename"], "IMG_0012.jpg", "newest first");
+
+    let page_three: Value = client.get(format!("{base}/api/media?offset=10&limit=5")).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
+    assert_eq!(page_three["items"].as_array().unwrap().len(), 2, "final partial page");
+    assert_eq!(page_three["items"][1]["filename"], "IMG_0001.jpg", "oldest last");
+
+    // Walking every page must visit each item exactly once — no repeats, none skipped.
+    let mut seen: Vec<String> = Vec::new();
+    for offset in (0..12).step_by(5) {
+        let page: Value = client.get(format!("{base}/api/media?offset={offset}&limit=5")).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
+        seen.extend(page["items"].as_array().unwrap().iter().map(|i| i["filename"].as_str().unwrap().to_string()));
+    }
+    let mut unique = seen.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(seen.len(), 12, "paging visited every item");
+    assert_eq!(unique.len(), 12, "paging visited none of them twice");
+
+    // An absurd page size is clamped rather than honoured.
+    let huge: Value = client.get(format!("{base}/api/media?limit=100000")).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
+    assert_eq!(huge["limit"], 500);
+}
+
+#[tokio::test]
+async fn heic_is_flagged_as_needing_a_server_rendered_preview() {
+    let (base, _tmp) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let token = login(&base, &client).await;
+
+    let cases = [
+        ("heic-flag", "IMG_1.HEIC", "image/heic", "photo", false),
+        ("png-flag", "shot.png", "image/png", "photo", true),
+        ("jpg-flag", "IMG_2.jpg", "image/jpeg", "photo", true),
+        ("mov-flag", "IMG_3.MOV", "video/quicktime", "video", false),
+    ];
+    for (asset, filename, content_type, media_type, _) in cases {
+        let form = upload_form(asset, filename, content_type, media_type, format!("bytes-for-{asset}").into_bytes());
+        client.post(format!("{base}/media/upload")).bearer_auth(&token).multipart(form).send().await.unwrap();
+    }
+
+    let list: Value = client.get(format!("{base}/api/media")).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
+    for (asset, _, _, _, displayable) in cases {
+        let item = list["items"].as_array().unwrap().iter().find(|i| i["asset_id"] == asset).unwrap();
+        assert_eq!(item["browser_displayable"], displayable, "{asset}");
+    }
 }
 
 #[tokio::test]

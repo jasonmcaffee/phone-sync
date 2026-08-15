@@ -35,10 +35,12 @@ xcrun simctl addmedia booted /path/to/photo.jpg /path/to/video.mp4
 ```
 
 ### 3. Browse the web gallery
-Open `http://<host>:8080/` in a browser and sign in. You get a grid of every
-imported photo and video; click any item to maximize it, and videos play inline
-(with streaming/seek support). See [phone-sync-server/README.md](phone-sync-server/README.md#web-gallery)
-for the HEIC caveat.
+Open `http://<host>:8080/` in a browser and sign in. You get a month-grouped grid
+of every imported photo and video that pages in as you scroll; click any item to
+maximize it, and videos stream and seek inline. HEIC is decoded server-side —
+tile grid reassembled, orientation applied — because no browser can display it.
+See [phone-sync-server/README.md](phone-sync-server/README.md#web-gallery) for how
+that works and which ffmpeg build it needs.
 
 ## How syncing works (and the iOS reality)
 
@@ -80,8 +82,9 @@ E:\pictures\2026\202608-phone-sync\IMG_0093.HEIC
 E:\pictures\2025\202512-phone-sync\IMG_0044.HEIC
 ```
 
-Only the metadata index and the thumbnail cache live in the data dir
+Only the metadata index and the thumbnail/preview caches live in the data dir
 (`E:\phone-sync-data`). Build with `phone-sync-server\build-windows.cmd` — it sets up
-the MSVC environment that `ring` needs. See
+the MSVC environment that `ring` needs, and run `fetch-ffmpeg.cmd` once to get a
+git ffmpeg build (release builds can't open HDR HEICs). See
 [phone-sync-server/README.md](phone-sync-server/README.md) for the full configuration,
 storage layout and de-duplication rules.

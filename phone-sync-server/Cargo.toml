@@ -6,6 +6,9 @@ edition = "2021"
 [dependencies]
 axum = { version = "0.7", features = ["multipart"] }
 tokio = { version = "1", features = ["full"] }
+# ReaderStream, so a 5 GB video is streamed off disk in bounded chunks instead
+# of being read into memory before it is served.
+tokio-util = { version = "0.7", features = ["io"] }
 tower-http = { version = "0.5", features = ["trace", "limit", "cors"] }
 tower = "0.4"
 serde = { version = "1", features = ["derive"] }
