@@ -38,6 +38,13 @@ ipconfig getifaddr en0
 | `PHONE_SYNC_PAGE_SIZE` | `120` | Default `/api/media` page size |
 | `PHONE_SYNC_MAX_PAGE_SIZE` | `500` | Cap on a caller-requested page size |
 | `PHONE_SYNC_THUMB_WORKERS` | half the cores (1-8) | Concurrency of the startup thumbnail backfill |
+| `PHONE_SYNC_SOCKET_SEND_BUFFER_BYTES` | `1048576` (1 MB) | SO_SNDBUF on accepted sockets — see *Connection limits* |
+| `PHONE_SYNC_SOCKET_RECV_BUFFER_BYTES` | `1048576` (1 MB) | SO_RCVBUF on accepted sockets |
+| `PHONE_SYNC_SOCKET_KEEPALIVE_SECS` | `60` | Idle time before TCP starts probing whether the peer exists |
+| `PHONE_SYNC_SOCKET_KEEPALIVE_INTERVAL_SECS` | `10` | Gap between keepalive probes |
+| `PHONE_SYNC_CONNECTION_IDLE_TIMEOUT_SECS` | `300` | No bytes in either direction for this long drops the connection |
+| `PHONE_SYNC_CONNECTION_IDLE_CHECK_SECS` | `15` | How often the stall watchdog samples a connection |
+| `PHONE_SYNC_SHUTDOWN_GRACE_SECS` | `5` | How long in-flight connections get after a shutdown signal |
 
 To generate a production password hash, run the server once and copy the login flow,
 or add a small helper; the dev default is fine for local use.
@@ -46,6 +53,32 @@ or add a small helper; the dev default is fine for local use.
 256-bit secret on first run and persists it to `<data dir>/jwt-secret`, so tokens
 survive restarts without a known constant being compiled into an internet-facing
 binary. Set the variable explicitly if you'd rather manage it yourself.
+
+## Connection limits (task-1556)
+
+`axum::serve` is not used. `src/serve.rs` runs the accept loop instead, because two things it cannot
+express turned out to matter a great deal.
+
+**A force-killed process must not be able to strand much.** On 2026-08-16 the Windows box ran out of
+RAM: 123 of 127.5 GB in use while every process working set summed to 54 GB. The missing 54 GB was
+kernel nonpaged pool tagged `AfdB` — Winsock socket buffers — held by the reverse proxy's
+connections to an instance of *this* server that had been replaced during the task-1542 gallery
+work. Service Manager stops services with `taskkill /F`, which is `TerminateProcess`: no signal
+handler runs, no destructor runs, and the kernel keeps whatever each socket had queued. The only
+thing that bounds that is the sockets themselves, so the listening socket is created with explicit
+1 MB send/receive buffers and TCP keepalive, all of which Windows' `accept` copies onto every
+accepted connection. Left to itself Windows auto-tunes these upward with no ceiling this process
+controls. 1 MB is far more than either real path can use: public traffic reaches this service over
+loopback from the proxy, and the app reaches it over the LAN.
+
+**A connection nobody is reading must not live forever.** A response body is only polled when the
+socket has room, so a client that stops reading a video mid-stream produces *no HTTP-level event at
+all* — no body-level or middleware timeout can observe it. The watchdog therefore counts bytes at
+the socket, below HTTP, and drops the whole connection after five minutes of no movement.
+
+Shutdown is graceful with a five-second deadline, after which in-flight connections are dropped.
+Under Service Manager that path never runs, which is exactly why the buffer bounds above are the
+part that actually protects the box.
 
 ## Where files are stored
 

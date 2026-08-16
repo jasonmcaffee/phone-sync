@@ -9,6 +9,7 @@ pub mod heif;
 pub mod imaging;
 pub mod models;
 pub mod orientation;
+pub mod serve;
 pub mod state;
 pub mod storage;
 

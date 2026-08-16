@@ -11,6 +11,12 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tower-http = { version = "0.5", features = ["trace", "limit", "cors"] }
 tower = "0.4"
+# task-1556: the accept loop is hand-rolled so each connection can be watched for stalling and
+# dropped, which axum::serve gives no way to do. socket2 sets the bounded send/receive buffers and
+# keepalive on the listening socket that every accepted connection then inherits.
+hyper = { version = "1", features = ["http1", "http2", "server"] }
+hyper-util = { version = "0.1", features = ["server-auto", "tokio", "service"] }
+socket2 = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 jsonwebtoken = "9"

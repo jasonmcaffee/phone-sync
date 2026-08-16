@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use phone_sync_server::serve::{self, ServeLimits};
 use phone_sync_server::state::AppState;
 use phone_sync_server::storage::Storage;
 use phone_sync_server::{build_app, config};
@@ -37,10 +38,31 @@ async fn main() -> anyhow::Result<()> {
     let bind_addr = state.config.bind_addr.clone();
     let app = build_app(state);
 
-    let listener = bind_with_retry(&bind_addr).await?;
-    tracing::info!("phone-sync-server listening on {bind_addr}");
-    axum::serve(listener, app).await?;
+    // task-1556: every accepted socket inherits bounded send/receive buffers and TCP keepalive from
+    // this listener, and every connection is watched for stalling. See `serve.rs` for why that is
+    // the part that protects the box: this process is stopped with `taskkill /F`, so nothing it
+    // could run at shutdown is guaranteed to run at all.
+    let limits = ServeLimits::from_env();
+    let listener = bind_with_retry(&bind_addr, &limits).await?;
+    tracing::info!(
+        "phone-sync-server listening on {bind_addr} (socket buffers {} KB send / {} KB recv, idle timeout {:?})",
+        limits.send_buffer_bytes / 1024,
+        limits.recv_buffer_bytes / 1024,
+        limits.idle_timeout
+    );
+    serve::serve(listener, app, limits, shutdown_signal()).await?;
+    tracing::info!("phone-sync-server stopped");
     Ok(())
+}
+
+/// Resolves when the process is asked to stop from a console or a terminal.
+///
+/// Service Manager stops this service with `taskkill /F`, which is `TerminateProcess` and delivers
+/// no signal at all — so this covers a manual run and a Ctrl-C, not the production restart path.
+/// It is still worth having: a graceful stop closes each connection rather than leaving the kernel
+/// to flush whatever was queued on it, which is the condition that started the task-1556 leak.
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 /// Generates every missing grid thumbnail in the background so the gallery is
@@ -112,11 +134,17 @@ async fn backfill_thumbnails(state: AppState) {
 /// finished releasing the old process's socket, which otherwise kills the new
 /// process outright with `os error 10048` and leaves the backup server down.
 /// @param bind_addr - the address to listen on
-async fn bind_with_retry(bind_addr: &str) -> anyhow::Result<tokio::net::TcpListener> {
+/// @param limits - the socket options every accepted connection inherits from this listener
+async fn bind_with_retry(bind_addr: &str, limits: &ServeLimits) -> anyhow::Result<tokio::net::TcpListener> {
     const ATTEMPTS: u32 = 30;
+    let addr: std::net::SocketAddr = tokio::net::lookup_host(bind_addr)
+        .await?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("could not resolve bind address {bind_addr}"))?;
+
     for attempt in 1..=ATTEMPTS {
-        match tokio::net::TcpListener::bind(bind_addr).await {
-            Ok(listener) => return Ok(listener),
+        match serve::build_listener(addr, limits) {
+            Ok(listener) => return Ok(tokio::net::TcpListener::from_std(listener)?),
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && attempt < ATTEMPTS => {
                 tracing::warn!("{bind_addr} still in use (attempt {attempt}/{ATTEMPTS}), retrying...");
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
