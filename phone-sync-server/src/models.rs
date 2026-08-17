@@ -141,6 +141,41 @@ pub struct PageQuery {
     pub limit: Option<usize>,
 }
 
+// MARK: - Delete verification (client deletes local items only once verified)
+
+/// Batch request asking the server to confirm it holds the exact full item for
+/// each content hash before the client deletes its local copy.
+#[derive(Debug, Deserialize)]
+pub struct VerifyRequest {
+    pub items: Vec<VerifyRequestItem>,
+    /// When true, the server re-hashes the on-disk file (proves completeness and
+    /// integrity, not just an index entry). The delete path sends `true`.
+    #[serde(default)]
+    pub deep: bool,
+}
+
+/// One item to verify: its content hash and expected full size in bytes.
+#[derive(Debug, Deserialize)]
+pub struct VerifyRequestItem {
+    pub sha256: String,
+    pub size: u64,
+}
+
+/// Per-item verification outcome. `verified` is true only when `reason == "ok"`.
+/// `reason` ∈ ok | not_found | missing_file | size_mismatch | hash_mismatch.
+#[derive(Debug, Serialize)]
+pub struct VerifyResult {
+    pub sha256: String,
+    pub verified: bool,
+    pub reason: String,
+}
+
+/// The batch verification response.
+#[derive(Debug, Serialize)]
+pub struct VerifyResponse {
+    pub results: Vec<VerifyResult>,
+}
+
 // MARK: - Chunked upload (large videos exceeding Cloudflare's 100 MB body cap)
 
 /// Metadata part of a chunk upload: which file (by full-content sha256) and

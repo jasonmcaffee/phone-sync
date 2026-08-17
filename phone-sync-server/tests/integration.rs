@@ -775,3 +775,66 @@ async fn client_can_upload_thumbnail_for_undecodable_media() {
     let item2 = list2["items"].as_array().unwrap().iter().find(|i| i["id"] == id).unwrap();
     assert_eq!(item2["thumbnailable"], true);
 }
+
+#[tokio::test]
+async fn verify_confirms_only_exact_full_items() {
+    use sha2::{Digest, Sha256};
+    let (base, tmp) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let token = login(&base, &client).await;
+
+    let bytes = b"the-only-copy-of-this-photo".to_vec();
+    let size = bytes.len() as u64;
+    let sha = hex::encode(Sha256::digest(&bytes));
+    let form = upload_form("del-1", "IMG_9.jpg", "image/jpeg", "photo", bytes.clone());
+    client.post(format!("{base}/media/upload")).bearer_auth(&token).multipart(form).send().await.unwrap();
+
+    // A batch mixing a good item, a missing item, and a wrong size.
+    let missing_sha = hex::encode(Sha256::digest(b"not uploaded"));
+    let resp: Value = client
+        .post(format!("{base}/media/verify"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "deep": true,
+            "items": [
+                { "sha256": sha, "size": size },
+                { "sha256": missing_sha, "size": 10 },
+                { "sha256": sha, "size": size + 1 },
+            ]
+        }))
+        .send().await.unwrap().json().await.unwrap();
+
+    let results = resp["results"].as_array().unwrap();
+    let by_reason = |i: usize| results[i]["reason"].as_str().unwrap();
+    assert_eq!(results[0]["verified"], true);
+    assert_eq!(by_reason(0), "ok");
+    assert_eq!(results[1]["verified"], false);
+    assert_eq!(by_reason(1), "not_found");
+    assert_eq!(results[2]["verified"], false);
+    assert_eq!(by_reason(2), "size_mismatch");
+
+    // Deep verification catches on-disk corruption that size/index checks miss.
+    let stored = find_stored_file(&tmp);
+    std::fs::write(&stored, b"the-only-copy-of-this-photX").unwrap(); // same length, different bytes
+    let corrupt: Value = client
+        .post(format!("{base}/media/verify"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "deep": true, "items": [{ "sha256": sha, "size": size }] }))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(corrupt["results"][0]["verified"], false);
+    assert_eq!(corrupt["results"][0]["reason"], "hash_mismatch");
+}
+
+/// Finds the single stored media file under the temp server's pictures tree.
+fn find_stored_file(tmp: &tempfile::TempDir) -> std::path::PathBuf {
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() { walk(&path, out); }
+            else if path.extension().map(|e| e == "jpg").unwrap_or(false) { out.push(path); }
+        }
+    }
+    let mut files = Vec::new();
+    walk(&tmp.path().join("pictures"), &mut files);
+    files.into_iter().next().expect("a stored jpg")
+}

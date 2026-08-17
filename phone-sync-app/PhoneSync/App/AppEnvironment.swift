@@ -11,6 +11,7 @@ final class AppEnvironment: ObservableObject {
     let syncEngine: SyncEngine
     let gridViewModel: GridViewModel
     let thumbnailStore: ThumbnailStore
+    let deletionEngine: DeletionEngine
 
     /// Builds the object graph. The API client's base URL comes from AuthService
     /// (which loads the persisted server URL).
@@ -27,6 +28,7 @@ final class AppEnvironment: ObservableObject {
         self.syncEngine = syncEngine
         self.gridViewModel = GridViewModel(photoService: photoService)
         self.thumbnailStore = ThumbnailStore(api: api)
+        self.deletionEngine = DeletionEngine(photoService: photoService, api: api, auth: auth, syncEngine: syncEngine)
     }
 
     /// Runs a full sync pass over the current photo library. Shared by the

@@ -64,6 +64,16 @@ final class SyncEngine: ObservableObject {
         records[assetId]?.state ?? .notSynced
     }
 
+    /// Drops local sync records for assets that have been deleted from the
+    /// device. The server copy (and the Synced view) is unaffected.
+    func forget(assetIds: [String]) {
+        for id in assetIds { records.removeValue(forKey: id) }
+        store.save(records)
+    }
+
+    /// Snapshot of the current per-asset sync records (for the deletion engine).
+    var currentRecords: [String: StoredSyncRecord] { records }
+
     /// Count of assets currently marked synced.
     var syncedCount: Int {
         records.values.filter { $0.state == .synced }.count

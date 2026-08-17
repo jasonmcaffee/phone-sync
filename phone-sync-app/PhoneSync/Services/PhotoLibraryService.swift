@@ -4,6 +4,9 @@ import UIKit
 import AVFoundation
 import UniformTypeIdentifiers
 
+/// Error thrown when a photo-library deletion is cancelled by the user or fails.
+enum PhotoDeletionError: Error { case cancelled }
+
 /// Lets PHAsset be used directly with SwiftUI's item-based presentations.
 extension PHAsset: Identifiable {
     public var id: String { localIdentifier }
@@ -67,6 +70,42 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
     /// for a server item that is still on this device).
     func asset(withLocalIdentifier id: String) -> PHAsset? {
         PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject
+    }
+
+    /// Returns the subset of the given localIdentifiers that still exist on this
+    /// device (used to find server items whose local copy can be deleted).
+    func existingLocalIdentifiers(_ ids: [String]) -> Set<String> {
+        let result = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
+        var present = Set<String>()
+        result.enumerateObjects { asset, _, _ in present.insert(asset.localIdentifier) }
+        return present
+    }
+
+    /// Exact byte size of an asset's primary resource, or nil if unavailable.
+    /// Used as a deletion pre-check (the server confirms its stored size matches).
+    func resourceByteSize(for asset: PHAsset) -> Int64? {
+        let resources = PHAssetResource.assetResources(for: asset)
+        guard let resource = primaryResource(from: resources, mediaType: asset.mediaType) else { return nil }
+        return (resource.value(forKey: "fileSize") as? NSNumber)?.int64Value
+    }
+
+    /// Deletes assets from the photo library. iOS shows its own delete
+    /// confirmation; throws if the user cancels or the change fails. This removes
+    /// the items from Photos entirely (and from iCloud Photos if enabled).
+    func deleteAssets(withLocalIdentifiers ids: [String]) async throws {
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
+        guard assets.count > 0 else { return }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            PHPhotoLibrary.shared().performChanges {
+                PHAssetChangeRequest.deleteAssets(assets)
+            } completionHandler: { success, error in
+                if success {
+                    continuation.resume()
+                } else {
+                    continuation.resume(throwing: error ?? PhotoDeletionError.cancelled)
+                }
+            }
+        }
     }
 
     /// Renders a thumbnail for grid display at approximately `targetSize`.

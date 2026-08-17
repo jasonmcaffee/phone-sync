@@ -33,6 +33,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/media/upload/status/:sha256", get(handlers::upload_status))
         .route("/media/upload/chunk", post(handlers::upload_chunk))
         .route("/media/upload/complete", post(handlers::upload_complete))
+        .route("/media/verify", post(handlers::verify))
         .route("/api/media", get(handlers::list_media))
         .route("/media/:id", get(handlers::get_media))
         .route("/media/:id/thumb", get(handlers::get_thumb).post(handlers::put_thumbnail))

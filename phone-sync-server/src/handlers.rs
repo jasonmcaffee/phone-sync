@@ -11,7 +11,7 @@ use crate::imaging::MediaTools;
 use crate::models::{
     ChunkAck, ChunkMetadata, ChunkStatusResponse, CompleteRequest, LoginRequest, LoginResponse,
     ManifestResponse, MediaListItem, MediaListResponse, MediaRecord, PageQuery, UploadMetadata,
-    UploadResponse,
+    UploadResponse, VerifyRequest, VerifyResponse, VerifyResult,
 };
 use crate::state::AppState;
 use crate::{auth, storage};
@@ -178,6 +178,27 @@ pub async fn upload_complete(State(state): State<AppState>, Json(req): Json<Comp
         StatusCode::CREATED,
         Json(UploadResponse { id: record.sha256.clone(), sha256: record.sha256, stored: true, duplicate }),
     ))
+}
+
+/// Confirms, per item, that the server holds the exact full file — so the client
+/// can safely delete its only local copy. `deep` re-hashes on-disk bytes.
+pub async fn verify(State(state): State<AppState>, Json(req): Json<VerifyRequest>) -> Result<Json<VerifyResponse>, ApiError> {
+    let storage = state.storage.clone();
+    // Verification (metadata + deep re-hash) is IO/CPU-bound — keep it off the
+    // async runtime.
+    let results = tokio::task::spawn_blocking(move || {
+        let deep = req.deep;
+        req.items
+            .into_iter()
+            .map(|item| {
+                let reason = storage.verify_item(&item.sha256, item.size, deep);
+                VerifyResult { sha256: item.sha256, verified: reason == "ok", reason: reason.to_string() }
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(VerifyResponse { results }))
 }
 
 /// Lists one page of stored media, newest first, for the web gallery.

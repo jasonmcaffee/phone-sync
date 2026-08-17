@@ -24,6 +24,7 @@ struct PhoneSyncApp: App {
                 .environmentObject(environment.auth)
                 .environmentObject(environment.syncEngine)
                 .environmentObject(environment.gridViewModel)
+                .environmentObject(environment.deletionEngine)
         }
     }
 }

@@ -104,6 +104,38 @@ impl Storage {
         (page, total)
     }
 
+    /// Verifies the server holds the *exact full item* for a content hash, so a
+    /// client can safely delete its only local copy. Checks: the record exists,
+    /// its file exists on disk, the file size matches `size`, and — when `deep` —
+    /// the file re-hashes to `sha256` (proving completeness + integrity, not just
+    /// an index entry). Returns "ok" when verified, otherwise a machine reason.
+    /// @param sha256 - the content hash to verify
+    /// @param size - the expected full size in bytes
+    /// @param deep - re-hash the on-disk file for certainty
+    pub fn verify_item(&self, sha256: &str, size: u64, deep: bool) -> &'static str {
+        let record = match self.get_by_id(sha256) {
+            Some(record) => record,
+            None => return "not_found",
+        };
+        let path = self.absolute_path(&record);
+        let metadata = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(_) => return "missing_file",
+        };
+        if metadata.len() != size {
+            return "size_mismatch";
+        }
+        if deep {
+            match hash_file(&path) {
+                Some(hash) if hash == sha256 => "ok",
+                Some(_) => "hash_mismatch",
+                None => "missing_file",
+            }
+        } else {
+            "ok"
+        }
+    }
+
     /// Path of the cached JPEG thumbnail for a content hash.
     fn thumb_path(&self, sha256: &str) -> PathBuf {
         self.data_dir.join("thumbs").join(format!("{}.jpg", sha256))
@@ -384,6 +416,24 @@ impl Storage {
         write_atomic(&dir.join(&name), bytes).context("writing media file")?;
         Ok(format!("{folder}/{name}"))
     }
+}
+
+/// Streams a file through SHA-256 in 1 MB blocks (so a multi-GB video isn't
+/// buffered in memory), returning the hex digest or None if unreadable.
+/// @param path - the file to hash
+fn hash_file(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer).ok()?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Some(hex::encode(hasher.finalize()))
 }
 
 /// Reports whether a browser can display the stored bytes directly.

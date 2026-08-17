@@ -49,6 +49,13 @@ final class ApiClient {
         return Set(response.assetIds)
     }
 
+    /// Asks the server to confirm, per item, that it holds the exact full file
+    /// (deep = re-hash on-disk bytes). Used to gate device deletion.
+    func verify(items: [VerifyRequestItem], deep: Bool, token: String) async throws -> [VerifyResult] {
+        let request = try makeRequest(path: "/media/verify", method: "POST", token: token, jsonBody: VerifyRequest(items: items, deep: deep))
+        return try await send(request, decode: VerifyResponse.self).results
+    }
+
     /// Fetches the full server library listing (newest first) for the Synced view.
     func fetchMediaList(token: String) async throws -> [MediaListItem] {
         let request = try makeRequest(path: "/api/media", method: "GET", token: token, jsonBody: Optional<LoginRequest>.none)

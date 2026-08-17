@@ -123,6 +123,33 @@ struct MediaListResponse: Decodable {
     let count: Int
 }
 
+// MARK: - Delete verification
+
+/// One item asking the server to confirm it holds the exact full file before we
+/// delete the local copy: its content hash and expected full size.
+struct VerifyRequestItem: Encodable {
+    let sha256: String
+    let size: Int64
+}
+
+/// The batch verify request; `deep` makes the server re-hash on-disk bytes.
+struct VerifyRequest: Encodable {
+    let items: [VerifyRequestItem]
+    let deep: Bool
+}
+
+/// Per-item verification outcome from the server.
+struct VerifyResult: Decodable {
+    let sha256: String
+    let verified: Bool
+    let reason: String
+}
+
+/// The batch verify response.
+struct VerifyResponse: Decodable {
+    let results: [VerifyResult]
+}
+
 // MARK: - Chunked upload
 
 /// Tunables for how large files are chunked. Cloudflare's proxied edge caps a

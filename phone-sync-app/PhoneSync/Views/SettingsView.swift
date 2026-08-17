@@ -8,6 +8,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var serverURL = ""
+    @State private var showFreeUpSpace = false
 
     var body: some View {
         NavigationStack {
@@ -26,6 +27,12 @@ struct SettingsView: View {
 
                 Section("Backup") {
                     LabeledContent("Synced items", value: "\(syncEngine.syncedCount)")
+                    Button {
+                        showFreeUpSpace = true
+                    } label: {
+                        Label("Free Up Space", systemImage: "internaldrive")
+                    }
+                    .accessibilityIdentifier("freeUpSpaceButton")
                 }
 
                 Section {
@@ -43,6 +50,7 @@ struct SettingsView: View {
                 }
             }
             .onAppear { serverURL = auth.serverConfig.baseURL }
+            .sheet(isPresented: $showFreeUpSpace) { FreeUpSpaceView() }
         }
     }
 }
