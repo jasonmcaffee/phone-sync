@@ -56,10 +56,20 @@ final class ApiClient {
         return try await send(request, decode: VerifyResponse.self).results
     }
 
-    /// Fetches the full server library listing (newest first) for the Synced view.
+    /// Fetches the full server library listing (newest first) for the Synced view
+    /// and deletion. The server pages `/api/media`, so this walks all pages.
     func fetchMediaList(token: String) async throws -> [MediaListItem] {
-        let request = try makeRequest(path: "/api/media", method: "GET", token: token, jsonBody: Optional<LoginRequest>.none)
-        return try await send(request, decode: MediaListResponse.self).items
+        var all: [MediaListItem] = []
+        var offset = 0
+        let pageSize = 500
+        while true {
+            let request = try makeRequest(path: "/api/media?offset=\(offset)&limit=\(pageSize)", method: "GET", token: token, jsonBody: Optional<LoginRequest>.none)
+            let page = try await send(request, decode: MediaListResponse.self)
+            all.append(contentsOf: page.items)
+            offset += page.items.count
+            if page.items.isEmpty || all.count >= page.count { break }
+        }
+        return all
     }
 
     /// Authenticated URL for a stored item's full bytes (image load / AVPlayer).
