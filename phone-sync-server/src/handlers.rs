@@ -320,22 +320,43 @@ where
 /// it — for every request, including the one-byte probe Safari opens with. No
 /// video could play, and a handful of requests would have taken the box down.
 pub async fn get_media(State(state): State<AppState>, Path(id): Path<String>, headers: HeaderMap) -> Result<Response, ApiError> {
-    use tokio::io::AsyncSeekExt;
-
     let record = state
         .storage
         .get_by_id(&id)
         .ok_or_else(|| ApiError::BadRequest("no such media id".into()))?;
 
     let etag = quoted_etag(&record.sha256, "orig");
+    let path = state.storage.absolute_path(&record);
+    let content_type = storage::served_content_type(&record).to_string();
+    serve_file_range(&path, &content_type, &etag, IMMUTABLE_CACHE, &headers).await
+}
+
+/// Streams a file from disk, honouring `Range` and `If-None-Match`.
+///
+/// The bytes are read in bounded chunks and streamed out; nothing is buffered
+/// whole. That matters more here than anywhere else in the service: the largest
+/// clip in the library is 4.97 GB, and an implementation that reads the file
+/// into memory before slicing the requested range out of it means no video can
+/// play and a handful of requests take the box down.
+///
+/// Shared by the private library route above and the public media-site assets
+/// (task-1569), so the public site's video streaming is the same proven code
+/// path rather than a second implementation of byte ranges.
+/// @param path - the file to serve
+/// @param content_type - the MIME type to label it with
+/// @param etag - the already-quoted entity tag for this exact rendition
+/// @param cache_control - the caching policy; public assets differ from private ones
+/// @param headers - the request headers, read for `Range` and `If-None-Match`
+pub(crate) async fn serve_file_range(path: &std::path::Path, content_type: &str, etag: &str, cache_control: &str, headers: &HeaderMap) -> Result<Response, ApiError> {
+    use tokio::io::AsyncSeekExt;
+
     // A conditional request is only safely answerable with 304 when the client
     // isn't asking for a range it doesn't already hold.
-    if headers.get(header::RANGE).is_none() && is_unmodified(&headers, &etag) {
-        return not_modified(&etag);
+    if headers.get(header::RANGE).is_none() && is_unmodified(headers, etag) {
+        return not_modified_with(etag, cache_control);
     }
 
-    let path = state.storage.absolute_path(&record);
-    let mut file = tokio::fs::File::open(&path)
+    let mut file = tokio::fs::File::open(path)
         .await
         .map_err(|e| ApiError::Internal(format!("opening media: {e}")))?;
     let total = file
@@ -359,13 +380,12 @@ pub async fn get_media(State(state): State<AppState>, Path(id): Path<String>, he
             .map_err(|e| ApiError::Internal(e.to_string()));
     }
 
-    let content_type = storage::served_content_type(&record).to_string();
     let common = |builder: axum::http::response::Builder| {
         builder
-            .header(header::CONTENT_TYPE, &content_type)
+            .header(header::CONTENT_TYPE, content_type)
             .header(header::ACCEPT_RANGES, "bytes")
-            .header(header::CACHE_CONTROL, IMMUTABLE_CACHE)
-            .header(header::ETAG, &etag)
+            .header(header::CACHE_CONTROL, cache_control)
+            .header(header::ETAG, etag)
     };
 
     let (status, start, length) = match range {
@@ -394,7 +414,7 @@ pub async fn get_media(State(state): State<AppState>, Path(id): Path<String>, he
 /// one another by a cache.
 /// @param sha256 - the content hash
 /// @param variant - which rendition ("orig", "thumb", "preview")
-fn quoted_etag(sha256: &str, variant: &str) -> String {
+pub(crate) fn quoted_etag(sha256: &str, variant: &str) -> String {
     format!("\"{sha256}-{variant}\"")
 }
 
@@ -408,12 +428,23 @@ fn is_unmodified(headers: &HeaderMap, etag: &str) -> bool {
         .is_some_and(|value| value == "*" || value.split(',').any(|candidate| candidate.trim() == etag))
 }
 
-/// Builds the empty 304 response for a cache hit.
+/// Builds the empty 304 response for a cache hit on a private rendition.
 /// @param etag - the tag the client already holds
 fn not_modified(etag: &str) -> Result<Response, ApiError> {
+    not_modified_with(etag, IMMUTABLE_CACHE)
+}
+
+/// Builds the empty 304 response for a cache hit under a given caching policy.
+///
+/// The policy has to travel with the 304 as well as with the 200: a public asset
+/// answered `private` on its revalidation would fall out of the edge cache the
+/// first time anyone reloaded it.
+/// @param etag - the tag the client already holds
+/// @param cache_control - the caching policy this rendition is served under
+fn not_modified_with(etag: &str, cache_control: &str) -> Result<Response, ApiError> {
     Response::builder()
         .status(StatusCode::NOT_MODIFIED)
-        .header(header::CACHE_CONTROL, IMMUTABLE_CACHE)
+        .header(header::CACHE_CONTROL, cache_control)
         .header(header::ETAG, etag)
         .body(Body::empty())
         .map_err(|e| ApiError::Internal(e.to_string()))

@@ -14,6 +14,10 @@ pub enum ApiError {
     BadRequest(String),
     /// Unexpected server-side failure.
     Internal(String),
+    /// No such resource. The public media-site routes answer everything they
+    /// cannot serve with this, whether the id never existed or was unpublished,
+    /// so a caller cannot tell the two apart.
+    NotFound(String),
 }
 
 impl IntoResponse for ApiError {
@@ -23,6 +27,7 @@ impl IntoResponse for ApiError {
             ApiError::Unauthorized(m) => (StatusCode::UNAUTHORIZED, m),
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
             ApiError::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m),
+            ApiError::NotFound(m) => (StatusCode::NOT_FOUND, m),
         };
         (status, Json(json!({ "error": message }))).into_response()
     }

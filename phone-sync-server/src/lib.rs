@@ -9,12 +9,15 @@ pub mod heif;
 pub mod imaging;
 pub mod models;
 pub mod orientation;
+pub mod publish;
+pub mod publish_handlers;
 pub mod serve;
 pub mod state;
 pub mod storage;
+pub mod transcode;
 
 use axum::extract::DefaultBodyLimit;
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{middleware, Router};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -38,6 +41,14 @@ pub fn build_app(state: AppState) -> Router {
         .route("/media/:id", get(handlers::get_media))
         .route("/media/:id/thumb", get(handlers::get_thumb).post(handlers::put_thumbnail))
         .route("/media/:id/preview", get(handlers::get_preview))
+        // Curating the public media site (task-1569). Publishing is a private
+        // action; only the /public/* routes below are anonymous.
+        .route("/api/publish", get(publish_handlers::list_published))
+        .route("/api/publish/:sha256", post(publish_handlers::publish_media))
+        .route(
+            "/api/publish/item/:public_id",
+            patch(publish_handlers::update_published).delete(publish_handlers::unpublish),
+        )
         .layer(middleware::from_fn_with_state(state.clone(), auth::require_auth));
 
     // Public routes (the gallery page shell loads, then authenticates via JS).
@@ -45,6 +56,11 @@ pub fn build_app(state: AppState) -> Router {
         .route("/health", get(handlers::health))
         .route("/", get(handlers::gallery))
         .route("/auth/login", post(handlers::login))
+        // The public face of media.jasonmcaffee.com. These see the publish index
+        // and nothing else — there is no path from here into the private library.
+        .route("/public/feed", get(publish_handlers::public_feed))
+        .route("/public/item/:public_id", get(publish_handlers::public_item))
+        .route("/public/asset/:public_id/:variant", get(publish_handlers::public_asset))
         .merge(protected)
         .layer(DefaultBodyLimit::max(max))
         .layer(CorsLayer::permissive())

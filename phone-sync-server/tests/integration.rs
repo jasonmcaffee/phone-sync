@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use phone_sync_server::auth;
 use phone_sync_server::config::Config;
+use phone_sync_server::publish::PublishStore;
 use phone_sync_server::state::AppState;
 use phone_sync_server::storage::Storage;
 use phone_sync_server::build_app;
@@ -39,9 +40,11 @@ async fn spawn_server() -> (String, tempfile::TempDir) {
         config.media_folder_suffix.clone(),
     )
     .unwrap();
+    let publish = PublishStore::open(&config.data_dir).unwrap();
     let state = AppState {
         config: Arc::new(config),
         storage: Arc::new(storage),
+        publish: Arc::new(publish),
     };
     let app = build_app(state);
 

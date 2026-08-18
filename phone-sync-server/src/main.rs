@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use phone_sync_server::publish::PublishStore;
 use phone_sync_server::serve::{self, ServeLimits};
 use phone_sync_server::state::AppState;
 use phone_sync_server::storage::Storage;
@@ -28,9 +29,12 @@ async fn main() -> anyhow::Result<()> {
         cfg.media_root.display(),
         cfg.media_folder_suffix
     );
+    let publish = PublishStore::open(&cfg.data_dir)?;
+    tracing::info!("published to the media site: {} items", publish.all().len());
     let state = AppState {
         config: Arc::new(cfg),
         storage: Arc::new(storage),
+        publish: Arc::new(publish),
     };
 
     tokio::spawn(backfill_thumbnails(state.clone()));

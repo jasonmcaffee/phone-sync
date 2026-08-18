@@ -71,6 +71,38 @@
   }
   .tile .play svg { width: 38px; height: 38px; filter: drop-shadow(0 1px 3px rgba(0,0,0,.6)); opacity: .95; }
 
+  /* Publishing to media.jasonmcaffee.com (task-1569) */
+  .badge.pub {
+    right: 6px; top: 6px; background: var(--red); color: #fff;
+    display: flex; align-items: center; gap: 4px;
+  }
+  .tile .check {
+    position: absolute; left: 6px; bottom: 6px; width: 22px; height: 22px; border-radius: 50%;
+    border: 2px solid rgba(255,255,255,.85); background: rgba(0,0,0,.35);
+    display: none; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 700; color: #fff;
+  }
+  body.selecting .tile .check { display: flex; }
+  body.selecting .tile.picked { outline: 3px solid var(--accent); outline-offset: -3px; }
+  body.selecting .tile.picked .check { background: var(--accent); border-color: var(--accent); }
+  .tile.working { opacity: .55; }
+  .tile.working::after {
+    content: ""; position: absolute; left: 50%; top: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px;
+    border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%;
+    animation: spin .7s linear infinite;
+  }
+  #publishbar {
+    position: fixed; left: 50%; transform: translateX(-50%);
+    bottom: max(18px, env(safe-area-inset-bottom)); z-index: 6;
+    display: none; align-items: center; gap: 12px;
+    padding: 10px 14px; border-radius: 12px;
+    background: rgba(22,25,31,.96); border: 1px solid var(--line);
+    box-shadow: 0 10px 34px rgba(0,0,0,.55);
+  }
+  body.selecting #publishbar { display: flex; }
+  #publishbar .n { font-size: 13px; color: var(--muted); min-width: 132px; }
+  #publishbar .n b { color: var(--text); }
+
   /* Paging */
   #sentinel { height: 1px; }
   #paging { text-align: center; color: var(--muted); font-size: 13px; padding: 22px 12px 40px; }
@@ -138,9 +170,18 @@
     <h1>Library</h1>
     <span class="count" id="count"></span>
     <span class="spacer"></span>
+    <button id="select">Select</button>
     <button id="refresh">Refresh</button>
     <button id="logout">Sign out</button>
   </header>
+
+  <!-- Publishing to the public media site (task-1569). Appears in select mode. -->
+  <div id="publishbar">
+    <span class="n" id="pub-status"><b>0</b> selected</span>
+    <button class="primary" id="pub-go">Publish to media</button>
+    <button id="pub-remove">Unpublish</button>
+    <button id="pub-cancel">Done</button>
+  </div>
 
   <div id="grid"></div>
   <div id="sentinel"></div>
@@ -182,6 +223,9 @@ let loading = false;     // a page request is in flight
 let exhausted = false;   // every page has been loaded
 let lastMonthLabel = null;
 let current = -1;
+let selecting = false;       // select mode, for publishing to the media site
+const picked = new Set();    // content ids picked in select mode
+let published = new Map();   // content id -> public id, for everything already on media
 
 const $ = (id) => document.getElementById(id);
 
@@ -246,6 +290,7 @@ async function reload() {
   exhausted = false;
   lastMonthLabel = null;
   $("grid").innerHTML = "";
+  await loadPublished();
   await loadNextPage();
 }
 
@@ -319,7 +364,10 @@ function appendTiles(page, firstIndex) {
 function makeTile(item, index) {
   const tile = document.createElement("div");
   tile.className = "tile";
-  tile.onclick = () => openLightbox(index);
+  tile.dataset.id = item.id;
+  // In select mode a tap picks the tile for publishing rather than opening it,
+  // which is the only sane way to choose forty photographs on a phone.
+  tile.onclick = () => (selecting ? togglePick(item.id, tile) : openLightbox(index));
 
   // The server thumbnails every format (ffmpeg reassembles HEIC tile grids and
   // grabs a video frame), so a plain <img> works for everything in the library.
@@ -338,7 +386,142 @@ function makeTile(item, index) {
   if (item.media_type === "video") {
     tile.insertAdjacentHTML("beforeend", videoBadgeHTML());
   }
+
+  const check = document.createElement("span");
+  check.className = "check";
+  check.textContent = "✓";
+  tile.appendChild(check);
+  if (picked.has(item.id)) tile.classList.add("picked");
+  if (published.has(item.id)) markPublished(tile, true);
   return tile;
+}
+
+// --- Publishing to media.jasonmcaffee.com (task-1569) ---
+
+/**
+ * Loads which library items are already on the public media site, so the grid
+ * can badge them and the Unpublish action knows what it is allowed to remove.
+ */
+async function loadPublished() {
+  if (!token) return;
+  try {
+    const res = await fetch("/api/publish", { headers: { Authorization: `Bearer ${token}` } });
+    if (!res.ok) return;
+    published = new Map((await res.json()).map((item) => [item.sha256, item.public_id]));
+  } catch {
+    // A failed load only costs the badges; publishing still works.
+  }
+}
+
+/** Adds or removes the "on media" badge on a tile. */
+function markPublished(tile, isPublished) {
+  const existing = tile.querySelector(".badge.pub");
+  if (isPublished && !existing) {
+    tile.insertAdjacentHTML("beforeend", `<span class="badge pub">MEDIA</span>`);
+  } else if (!isPublished && existing) {
+    existing.remove();
+  }
+}
+
+/** Picks or unpicks one tile and refreshes the action bar. */
+function togglePick(id, tile) {
+  if (picked.has(id)) picked.delete(id);
+  else picked.add(id);
+  tile.classList.toggle("picked", picked.has(id));
+  renderPublishBar();
+}
+
+/** Enters or leaves select mode, clearing any picks on the way out. */
+function setSelecting(on) {
+  selecting = on;
+  document.body.classList.toggle("selecting", on);
+  $("select").textContent = on ? "Cancel" : "Select";
+  if (!on) {
+    picked.clear();
+    document.querySelectorAll(".tile.picked").forEach((tile) => tile.classList.remove("picked"));
+  }
+  renderPublishBar();
+}
+
+/** Updates the action bar's count and which actions are available. */
+function renderPublishBar() {
+  const chosen = [...picked];
+  const alreadyUp = chosen.filter((id) => published.has(id)).length;
+  $("pub-status").innerHTML = `<b>${chosen.length}</b> selected${alreadyUp ? ` · ${alreadyUp} on media` : ""}`;
+  $("pub-go").disabled = chosen.length === 0;
+  $("pub-remove").disabled = alreadyUp === 0;
+}
+
+/**
+ * Publishes every picked item, one at a time.
+ *
+ * Sequential on purpose: publishing a video runs an ffmpeg transcode, and firing
+ * forty of those at once would take the box down. The bar reports progress as it
+ * goes, because a 40-second clip is a 40-second wait.
+ */
+async function publishPicked() {
+  const chosen = [...picked].filter((id) => !published.has(id));
+  if (!chosen.length) return;
+  $("pub-go").disabled = true;
+  $("pub-remove").disabled = true;
+
+  let done = 0;
+  let failed = 0;
+  for (const id of chosen) {
+    const tile = document.querySelector(`.tile[data-id="${id}"]`);
+    tile?.classList.add("working");
+    $("pub-status").innerHTML = `Publishing <b>${done + 1}</b> of ${chosen.length}…`;
+    try {
+      const res = await fetch(`/api/publish/${id}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: "{}",
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const item = await res.json();
+      published.set(id, item.public_id);
+      if (tile) markPublished(tile, true);
+      done++;
+    } catch (err) {
+      failed++;
+      console.error("publish failed for", id, err);
+    } finally {
+      tile?.classList.remove("working");
+    }
+  }
+  $("pub-status").innerHTML = `Published <b>${done}</b>${failed ? ` · ${failed} failed` : ""}`;
+  picked.clear();
+  document.querySelectorAll(".tile.picked").forEach((tile) => tile.classList.remove("picked"));
+  $("pub-go").disabled = false;
+  $("pub-remove").disabled = true;
+}
+
+/**
+ * Removes every picked item that is currently published. Only the derivatives
+ * rendered for the media site are deleted — the original stays in the library.
+ */
+async function unpublishPicked() {
+  const chosen = [...picked].filter((id) => published.has(id));
+  if (!chosen.length) return;
+  for (const id of chosen) {
+    const tile = document.querySelector(`.tile[data-id="${id}"]`);
+    tile?.classList.add("working");
+    try {
+      const res = await fetch(`/api/publish/item/${published.get(id)}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok || res.status === 404) {
+        published.delete(id);
+        if (tile) markPublished(tile, false);
+      }
+    } finally {
+      tile?.classList.remove("working");
+    }
+  }
+  picked.clear();
+  document.querySelectorAll(".tile.picked").forEach((tile) => tile.classList.remove("picked"));
+  renderPublishBar();
 }
 
 /** Video badge + play overlay markup. */
@@ -463,12 +646,19 @@ $("login-form").addEventListener("submit", async (e) => {
 });
 $("logout").onclick = logout;
 $("refresh").onclick = reload;
+$("select").onclick = () => setSelecting(!selecting);
+$("pub-cancel").onclick = () => setSelecting(false);
+$("pub-go").onclick = publishPicked;
+$("pub-remove").onclick = unpublishPicked;
 $("lb-close").onclick = closeLightbox;
 $("lb-prev").onclick = () => navigate(-1);
 $("lb-next").onclick = () => navigate(1);
 $("lightbox").addEventListener("click", (e) => { if (e.target.id === "lightbox") closeLightbox(); });
 document.addEventListener("keydown", (e) => {
-  if (!$("lightbox").classList.contains("open")) return;
+  if (!$("lightbox").classList.contains("open")) {
+    if (e.key === "Escape" && selecting) setSelecting(false);
+    return;
+  }
   if (e.key === "Escape") closeLightbox();
   else if (e.key === "ArrowLeft") navigate(-1);
   else if (e.key === "ArrowRight") navigate(1);
