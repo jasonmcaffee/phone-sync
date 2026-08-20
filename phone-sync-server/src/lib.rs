@@ -55,6 +55,11 @@ pub fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(handlers::health))
         .route("/", get(handlers::gallery))
+        // The gallery's own assets. Public alongside the shell it belongs to —
+        // they carry no library data, only the page's presentation.
+        .route("/gallery.css", get(handlers::gallery_css))
+        .route("/gallery.js", get(handlers::gallery_js))
+        .route("/fonts/:name", get(handlers::gallery_font))
         .route("/auth/login", post(handlers::login))
         // The public face of media.jasonmcaffee.com. These see the publish index
         // and nothing else — there is no path from here into the private library.

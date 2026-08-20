@@ -119,6 +119,15 @@ pub struct MediaListItem {
     /// The MIME type `/media/:id` will serve these bytes as, which differs from
     /// the uploaded type for iPhone video (see `storage::served_content_type`).
     pub served_content_type: String,
+    /// Width of the item's cached thumbnail. Deliberately named for what it is:
+    /// the thumbnail is bounded by `thumbnail_max_dim` on its longest edge, so
+    /// this is **not** the photograph's own width — only the two together carry
+    /// information, and what they carry is its aspect ratio, which is what the
+    /// gallery needs to lay frames out uncropped before anything has loaded.
+    /// Null for an item that has not been thumbnailed yet.
+    pub thumb_width: Option<u32>,
+    /// Height of the item's cached thumbnail. See `thumb_width`.
+    pub thumb_height: Option<u32>,
 }
 
 /// One page of the gallery listing, newest first.

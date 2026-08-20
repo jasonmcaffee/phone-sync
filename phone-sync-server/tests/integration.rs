@@ -841,3 +841,184 @@ fn find_stored_file(tmp: &tempfile::TempDir) -> std::path::PathBuf {
     walk(&tmp.path().join("pictures"), &mut files);
     files.into_iter().next().expect("a stored jpg")
 }
+
+// MARK: - The web gallery (task-1596)
+
+/// Builds a PNG of an explicit shape, so a test can assert what the listing
+/// reports about a frame that is not square.
+/// @param width - image width in pixels
+/// @param height - image height in pixels
+fn make_png_sized(width: u32, height: u32) -> Vec<u8> {
+    let img = image::RgbImage::from_pixel(width, height, image::Rgb([40, 160, 90]));
+    let mut buf = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(img)
+        .write_to(&mut buf, image::ImageFormat::Png)
+        .unwrap();
+    buf.into_inner()
+}
+
+#[tokio::test]
+async fn api_media_reports_true_display_dimensions() {
+    let (base, _tmp) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let token = login(&base, &client).await;
+
+    // Deliberately not square: a square would pass even if the server were
+    // reporting a cropped tile's shape rather than the photograph's.
+    let form = upload_form("dims-1", "wide.png", "image/png", "photo", make_png_sized(400, 200));
+    let up: Value = client.post(format!("{base}/media/upload")).bearer_auth(&token).multipart(form).send().await.unwrap().json().await.unwrap();
+    let id = up["id"].as_str().unwrap().to_string();
+
+    // Requesting the thumbnail is what caches it, and that cached JPEG is where
+    // the dimensions are read from.
+    let thumb = client.get(format!("{base}/media/{id}/thumb")).bearer_auth(&token).send().await.unwrap();
+    assert_eq!(thumb.status(), 200);
+
+    // The numbers are the thumbnail's — it is fitted to thumbnail_max_dim in
+    // either direction — and it is their RATIO that is the photograph's, which
+    // is the only thing the justified layout needs.
+    let list: Value = client.get(format!("{base}/api/media")).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
+    let width = list["items"][0]["thumb_width"].as_f64().expect("a measured width");
+    let height = list["items"][0]["thumb_height"].as_f64().expect("a measured height");
+    assert!((width / height - 2.0).abs() < 0.02, "a 400x200 frame should list as 2:1, got {width}x{height}");
+    assert_eq!(width.max(height) as u32, 512, "the thumbnail is fitted to the configured longest edge");
+}
+
+#[tokio::test]
+async fn api_media_omits_dimensions_until_an_item_is_thumbnailed() {
+    let (base, _tmp) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let token = login(&base, &client).await;
+
+    let form = upload_form("dims-2", "fresh.png", "image/png", "photo", make_png_sized(300, 400));
+    client.post(format!("{base}/media/upload")).bearer_auth(&token).multipart(form).send().await.unwrap();
+
+    // No thumbnail has been asked for yet, so there is nothing to measure. That
+    // is a null, not an error: the gallery lays that one frame out square and
+    // corrects it from the image once it loads.
+    let list: Value = client.get(format!("{base}/api/media")).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
+    assert_eq!(list["count"], 1);
+    assert!(list["items"][0]["thumb_width"].is_null());
+    assert!(list["items"][0]["thumb_height"].is_null());
+}
+
+#[tokio::test]
+async fn a_replacement_thumbnail_updates_the_reported_dimensions() {
+    let (base, _tmp) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let token = login(&base, &client).await;
+
+    let form = upload_form("dims-3", "shape.png", "image/png", "photo", make_png_sized(400, 200));
+    let up: Value = client.post(format!("{base}/media/upload")).bearer_auth(&token).multipart(form).send().await.unwrap().json().await.unwrap();
+    let id = up["id"].as_str().unwrap().to_string();
+    client.get(format!("{base}/media/{id}/thumb")).bearer_auth(&token).send().await.unwrap();
+
+    // iOS can upload its own thumbnail for something the server cannot decode,
+    // and it may have a different shape, so the memoized measurement has to go.
+    let replacement = {
+        let img = image::RgbImage::from_pixel(120, 480, image::Rgb([10, 10, 10]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img).write_to(&mut buf, image::ImageFormat::Jpeg).unwrap();
+        buf.into_inner()
+    };
+    let put = client.post(format!("{base}/media/{id}/thumb")).bearer_auth(&token).body(replacement).send().await.unwrap();
+    assert_eq!(put.status(), 201);
+
+    let list: Value = client.get(format!("{base}/api/media")).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
+    assert_eq!(list["items"][0]["thumb_width"], 120);
+    assert_eq!(list["items"][0]["thumb_height"], 480);
+}
+
+#[tokio::test]
+async fn the_gallerys_own_assets_are_served() {
+    let (base, _tmp) = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    let css = client.get(format!("{base}/gallery.css")).send().await.unwrap();
+    assert_eq!(css.status(), 200);
+    assert!(css.headers()["content-type"].to_str().unwrap().starts_with("text/css"));
+    assert!(css.text().await.unwrap().contains(".stream__row"));
+
+    let js = client.get(format!("{base}/gallery.js")).send().await.unwrap();
+    assert_eq!(js.status(), 200);
+    assert!(js.text().await.unwrap().contains("togglePublish"));
+
+    for name in ["general-sans-400.woff2", "general-sans-500.woff2", "martian-mono-400.woff2", "excon-500.woff2"] {
+        let font = client.get(format!("{base}/fonts/{name}")).send().await.unwrap();
+        assert_eq!(font.status(), 200, "{name} should be served");
+        assert_eq!(font.headers()["content-type"], "font/woff2");
+        assert!(!font.bytes().await.unwrap().is_empty());
+    }
+
+    // The font route matches a closed set of literals, so anything else — a
+    // traversal attempt included — is a plain 404 with no filesystem access.
+    assert_eq!(client.get(format!("{base}/fonts/nope.woff2")).send().await.unwrap().status(), 404);
+    assert_eq!(client.get(format!("{base}/fonts/..%2f..%2fjwt-secret")).send().await.unwrap().status(), 404);
+}
+
+#[tokio::test]
+async fn the_gallery_page_carries_no_select_mode_or_media_badge() {
+    let (base, _tmp) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let shell = client.get(format!("{base}/")).send().await.unwrap().text().await.unwrap();
+    let script = client.get(format!("{base}/gallery.js")).send().await.unwrap().text().await.unwrap();
+
+    // task-1596 removed the select mode and the badge outright; publishing is a
+    // toggle on the frame.
+    for gone in ["publishbar", "pub-go", "badge pub"] {
+        assert!(!shell.contains(gone), "the shell should no longer contain {gone}");
+        assert!(!script.contains(gone), "the script should no longer contain {gone}");
+    }
+    assert!(script.contains("'switch'"), "the publish control should be a switch");
+}
+
+#[tokio::test]
+async fn publishing_and_unpublishing_leaves_the_original_untouched() {
+    let (base, tmp) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let token = login(&base, &client).await;
+
+    let form = upload_form("pub-1", "pic.png", "image/png", "photo", make_png_sized(320, 240));
+    let up: Value = client.post(format!("{base}/media/upload")).bearer_auth(&token).multipart(form).send().await.unwrap().json().await.unwrap();
+    let id = up["id"].as_str().unwrap().to_string();
+
+    let stored = find_stored_media(&tmp);
+    let before = std::fs::read(&stored).unwrap();
+
+    // Toggle on.
+    let created = client.post(format!("{base}/api/publish/{id}")).bearer_auth(&token).json(&serde_json::json!({})).send().await.unwrap();
+    assert_eq!(created.status(), 201);
+    let item: Value = created.json().await.unwrap();
+    let public_id = item["public_id"].as_str().unwrap().to_string();
+
+    let listed: Value = client.get(format!("{base}/api/publish")).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 1, "the toggle's state comes from this listing");
+    assert_eq!(listed[0]["sha256"], id);
+
+    // Toggle off.
+    let removed = client.delete(format!("{base}/api/publish/item/{public_id}")).bearer_auth(&token).send().await.unwrap();
+    assert_eq!(removed.status(), 204);
+    let empty: Value = client.get(format!("{base}/api/publish")).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
+    assert!(empty.as_array().unwrap().is_empty());
+
+    // The private library is never modified by either direction of the toggle.
+    assert_eq!(std::fs::read(&stored).unwrap(), before, "the original must be byte-identical after a publish round trip");
+}
+
+/// Finds the single stored media file under the temp server's pictures tree,
+/// whatever extension it was uploaded with.
+fn find_stored_media(tmp: &tempfile::TempDir) -> std::path::PathBuf {
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(&tmp.path().join("pictures"), &mut files);
+    files.into_iter().next().expect("a stored media file")
+}

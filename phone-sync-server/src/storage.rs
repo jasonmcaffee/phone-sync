@@ -39,6 +39,9 @@ pub struct Storage {
     write_lock: Mutex<()>,
     /// asset_id -> record. Protected for concurrent uploads.
     index: Mutex<HashMap<String, MediaRecord>>,
+    /// sha256 -> display dimensions read off the cached thumbnail, so a listing
+    /// only ever pays for a given item's JPEG header once per process.
+    dimensions: Mutex<HashMap<String, (u32, u32)>>,
 }
 
 impl Storage {
@@ -59,6 +62,7 @@ impl Storage {
             folder_suffix,
             write_lock: Mutex::new(()),
             index: Mutex::new(index),
+            dimensions: Mutex::new(HashMap::new()),
         })
     }
 
@@ -152,13 +156,48 @@ impl Storage {
         self.thumb_path(sha256).exists()
     }
 
+    /// The pixel dimensions of an item's cached thumbnail.
+    ///
+    /// The gallery lays its frames out in justified rows at their true aspect
+    /// ratio, so it needs each item's *shape* before any image has loaded. The
+    /// records themselves carry no dimensions, and re-deriving them from the
+    /// originals is not viable at listing time — most of this library is HEIC,
+    /// and decoding one is an ffmpeg subprocess costing about half a second.
+    ///
+    /// The thumbnail cache already holds the shape: every thumbnail is a JPEG
+    /// fitted to `thumbnail_max_dim` with its orientation already applied, so
+    /// its aspect ratio is the photograph's aspect ratio. The absolute numbers
+    /// are the thumbnail's own and are **not** the photograph's — the scale
+    /// filter fits the source to the box in either direction — which is why the
+    /// listing field is named `thumb_width` rather than `width`.
+    ///
+    /// Only the JPEG header is read — no pixels are decoded — and the result is
+    /// memoized, so a page is measured once per process and a re-scroll is free.
+    ///
+    /// None when the item has no cached thumbnail yet, which is ordinary rather
+    /// than an error: the caller lays that one frame out square and corrects it
+    /// from the image once it loads.
+    /// @param sha256 - content hash of the item
+    pub fn thumbnail_dimensions(&self, sha256: &str) -> Option<(u32, u32)> {
+        if let Some(known) = self.dimensions.lock().unwrap().get(sha256) {
+            return Some(*known);
+        }
+        let measured = read_jpeg_dimensions(&self.thumb_path(sha256))?;
+        self.dimensions.lock().unwrap().insert(sha256.to_string(), measured);
+        Some(measured)
+    }
+
     /// Stores a client-provided JPEG thumbnail for a content hash. iOS can
     /// thumbnail HEIC and video (which the server's image decoder can't), so the
     /// app uploads previews here for everything.
     /// @param sha256 - content hash the thumbnail belongs to
     /// @param jpeg - the JPEG thumbnail bytes
     pub fn store_thumbnail(&self, sha256: &str, jpeg: &[u8]) -> Result<()> {
-        write_atomic(&self.thumb_path(sha256), jpeg).context("writing thumbnail")
+        write_atomic(&self.thumb_path(sha256), jpeg).context("writing thumbnail")?;
+        // A replacement thumbnail can have a different shape, so the memoized
+        // dimensions for this item are no longer trustworthy.
+        self.dimensions.lock().unwrap().remove(sha256);
+        Ok(())
     }
 
     /// Returns the grid thumbnail for a record, generating and caching it on
@@ -416,6 +455,16 @@ impl Storage {
         write_atomic(&dir.join(&name), bytes).context("writing media file")?;
         Ok(format!("{folder}/{name}"))
     }
+}
+
+/// Reads a cached JPEG's pixel dimensions from its header, without decoding it.
+///
+/// `into_dimensions` stops at the frame header, so this costs one small read
+/// rather than a full decode — which is what makes measuring a whole listing
+/// page affordable the first time it is asked for.
+/// @param path - the cached JPEG to measure
+fn read_jpeg_dimensions(path: &Path) -> Option<(u32, u32)> {
+    image::ImageReader::open(path).ok()?.with_guessed_format().ok()?.into_dimensions().ok()
 }
 
 /// Streams a file through SHA-256 in 1 MB blocks (so a multi-GB video isn't

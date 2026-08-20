@@ -207,32 +207,54 @@ pub async fn verify(State(state): State<AppState>, Json(req): Json<VerifyRequest
 /// them all made the gallery wait on a multi-megabyte JSON body before it could
 /// paint a single tile. Callers walk the library with `offset`/`limit` and stop
 /// when `offset + items.len() >= count`.
+///
+/// Each item carries its display dimensions so the gallery can lay frames out in
+/// justified rows at their true aspect ratio before any image loads. Those come
+/// from the cached thumbnails' JPEG headers, which is file I/O — so the page is
+/// assembled on the blocking pool rather than on an async worker.
 pub async fn list_media(State(state): State<AppState>, Query(page): Query<PageQuery>) -> Result<Json<MediaListResponse>, ApiError> {
     let limit = page.limit.unwrap_or(state.config.default_page_size).clamp(1, state.config.max_page_size);
     let offset = page.offset.unwrap_or(0);
-    let (records, count) = state.storage.records_page(offset, limit);
+    let storage = state.storage.clone();
 
-    let items: Vec<MediaListItem> = records
-        .into_iter()
-        .map(|r| MediaListItem {
-            // The server thumbnails every format (ffmpeg for HEIC and video),
-            // generated on demand and cached, so the grid never has a hole.
-            thumbnailable: true,
-            // Whether the *original* bytes can go straight into an <img>. HEIC
-            // can't, so the gallery asks for /preview instead of guessing.
-            browser_displayable: storage::is_browser_displayable(&r.content_type, &r.filename),
-            served_content_type: storage::served_content_type(&r).to_string(),
-            id: r.sha256,
-            asset_id: r.asset_id,
-            filename: r.filename,
-            content_type: r.content_type,
-            media_type: r.media_type,
-            created_at: r.created_at,
-            size: r.size,
-            rel_path: r.rel_path,
-        })
-        .collect();
+    let (items, count) = tokio::task::spawn_blocking(move || {
+        let (records, count) = storage.records_page(offset, limit);
+        let items = records.into_iter().map(|r| list_item(&storage, r)).collect::<Vec<_>>();
+        (items, count)
+    })
+    .await
+    .map_err(|e| ApiError::Internal(format!("listing task failed: {e}")))?;
+
     Ok(Json(MediaListResponse { count, offset, limit, items }))
+}
+
+/// Presents one stored record as a gallery listing item.
+/// @param storage - used to look up the item's cached display dimensions
+/// @param record - the stored record to present
+fn list_item(storage: &crate::storage::Storage, record: MediaRecord) -> MediaListItem {
+    let (thumb_width, thumb_height) = match storage.thumbnail_dimensions(&record.sha256) {
+        Some((w, h)) => (Some(w), Some(h)),
+        None => (None, None),
+    };
+    MediaListItem {
+        // The server thumbnails every format (ffmpeg for HEIC and video),
+        // generated on demand and cached, so the grid never has a hole.
+        thumbnailable: true,
+        // Whether the *original* bytes can go straight into an <img>. HEIC
+        // can't, so the gallery asks for /preview instead of guessing.
+        browser_displayable: storage::is_browser_displayable(&record.content_type, &record.filename),
+        served_content_type: storage::served_content_type(&record).to_string(),
+        thumb_width,
+        thumb_height,
+        id: record.sha256,
+        asset_id: record.asset_id,
+        filename: record.filename,
+        content_type: record.content_type,
+        media_type: record.media_type,
+        created_at: record.created_at,
+        size: record.size,
+        rel_path: record.rel_path,
+    }
 }
 
 /// Stores a client-generated JPEG thumbnail for an item (request body is the
@@ -512,9 +534,68 @@ fn parse_range(header_value: &str, total: u64) -> RangeRequest {
     RangeRequest::Satisfiable { start, end }
 }
 
-/// Serves the self-contained web gallery single-page app.
+/// Serves the web gallery's page shell.
 pub async fn gallery() -> impl IntoResponse {
     Html(include_str!("gallery.html"))
+}
+
+/// The gallery's own stylesheet and script are always revalidated.
+///
+/// These are compiled into the binary, so a deploy is the only thing that
+/// changes them — and they carry no version in their URL, so any freshness
+/// window at all means the browser keeps running the previous build after a
+/// restart. A five-minute window was tried first and did exactly that: the page
+/// came back from a redeploy still executing the script it had cached. They are
+/// tens of kilobytes over the LAN; revalidating is not worth a stale UI.
+const ASSET_CACHE: &str = "no-cache";
+/// Fonts are content-stable under their versioned names.
+const FONT_CACHE: &str = "public, max-age=31536000, immutable";
+
+/// Serves the gallery's stylesheet.
+pub async fn gallery_css() -> impl IntoResponse {
+    text_asset(include_str!("gallery.css"), "text/css; charset=utf-8", ASSET_CACHE)
+}
+
+/// Serves the gallery's script.
+pub async fn gallery_js() -> impl IntoResponse {
+    text_asset(include_str!("gallery.js"), "text/javascript; charset=utf-8", ASSET_CACHE)
+}
+
+/// Serves one of the vendored web fonts the gallery is set in.
+///
+/// The same four faces `media.jasonmcaffee.com` uses, compiled into the binary
+/// so this page makes no third-party request either. `name` is matched against a
+/// closed set of literals, so a caller-supplied fragment can never reach the
+/// filesystem — there is no filesystem access on this path at all.
+/// @param name - the requested font file name
+pub async fn gallery_font(Path(name): Path<String>) -> Result<Response, ApiError> {
+    let bytes: &'static [u8] = match name.as_str() {
+        "general-sans-400.woff2" => include_bytes!("fonts/general-sans-400.woff2"),
+        "general-sans-500.woff2" => include_bytes!("fonts/general-sans-500.woff2"),
+        "martian-mono-400.woff2" => include_bytes!("fonts/martian-mono-400.woff2"),
+        "excon-500.woff2" => include_bytes!("fonts/excon-500.woff2"),
+        _ => return Err(ApiError::NotFound("no such font".into())),
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "font/woff2")
+        .header(header::CACHE_CONTROL, FONT_CACHE)
+        .header(header::CONTENT_LENGTH, bytes.len().to_string())
+        .body(Body::from(bytes))
+        .map_err(|e| ApiError::Internal(e.to_string()))
+}
+
+/// Wraps a compiled-in text asset in a response with an explicit cache policy.
+/// @param body - the asset's contents
+/// @param content_type - the MIME type to serve it as
+/// @param cache_control - how long the browser may keep it
+fn text_asset(body: &'static str, content_type: &'static str, cache_control: &'static str) -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, content_type), (header::CACHE_CONTROL, cache_control)],
+        body,
+    )
+        .into_response()
 }
 
 #[cfg(test)]

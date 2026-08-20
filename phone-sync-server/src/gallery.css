@@ -1,0 +1,957 @@
+/*
+ * Phone Sync — the library, on a light table.
+ *
+ * This is the private side of media.jasonmcaffee.com, and it is deliberately
+ * set in the same language: lit glass, frames at their true aspect ratio in
+ * justified rows, month rules in edge-print mono, and one signal colour — the
+ * chinagraph red a picture editor rings a select with.
+ *
+ * Two things it does that the public site refuses, and why:
+ *
+ *  1. It has a small amount of furniture — a rail with the counts, Refresh and
+ *     Sign out. A curation tool needs controls; it is not sticky, and it is set
+ *     in the same edge print as a month rule, so the page is still photographs
+ *     from the first screenful down.
+ *  2. It draws one control on the frame: the publish toggle. The public site's
+ *     rule is that nothing is drawn on top of a photograph, and that rule is
+ *     about *metadata* — the hover card every gallery in the category shows.
+ *     A control is not metadata. It is 30x17, it is invisible until the frame is
+ *     pointed at, and when it is on its red is the only indicator there is.
+ *
+ * Palette, type scale and geometry are copied from media-site/src/app/globals.css
+ * so the two surfaces read as one object. Everything is vendored: no font, no
+ * script and no stylesheet is fetched from anywhere but this binary.
+ */
+
+/* ---------- Fonts, compiled into the server binary ----------
+   The same four faces media.jasonmcaffee.com is set in, so there are no
+   third-party requests here either. See src/fonts/README.md for where each one
+   came from — and note that Martian Mono has to be Google's **latin** subset:
+   media-site/scripts/vendor-fonts.cjs keeps the first @font-face block Google
+   returns, which is cyrillic-ext, and a mono face with no Latin letters silently
+   falls back per glyph. */
+
+@font-face {
+  font-family: 'General Sans';
+  src: url('/fonts/general-sans-400.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'General Sans';
+  src: url('/fonts/general-sans-500.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Martian Mono';
+  src: url('/fonts/martian-mono-400.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Excon';
+  src: url('/fonts/excon-500.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ---------- Tokens ---------- */
+
+:root {
+  /* TABLE: lit glass, daylight balanced, deliberately not paper-white. */
+  --glass-100: #f4f6f4;
+  --glass-200: #e9ecea;
+  --glass-300: #dde2df;
+  --glass-400: #cbd2ce;
+  --glass-500: #aab3ae;
+
+  --ink-900: #12161a;
+  --ink-600: #3f484e;
+  --ink-400: #5a646b;
+
+  /* The dark surface: the detail view, because a photograph is judged
+     against black. */
+  --dark-900: #0a0b0c;
+  --dark-800: #121416;
+  --bone: #eceef0;
+  --smoke: #a2a9ae;
+  --smoke-dim: #848c93;
+
+  /* THE SIGNAL: chinagraph red. */
+  --mark: #e0301c;
+  --mark-text: #c02411;
+
+  --gutter: clamp(1.15rem, 3.5vw, 3.5rem);
+  --shell: 1680px;
+  --gap: 10px;
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  --text-face: 'General Sans', 'Segoe UI', system-ui, sans-serif;
+  --display: 'Excon', 'Segoe UI', system-ui, sans-serif;
+  --mono: 'Martian Mono', ui-monospace, 'Cascadia Mono', monospace;
+
+  --step--2: clamp(0.68rem, 0.66rem + 0.1vw, 0.74rem);
+  --step--1: clamp(0.78rem, 0.75rem + 0.15vw, 0.86rem);
+  --step-0: clamp(0.98rem, 0.94rem + 0.2vw, 1.08rem);
+
+  --hairline: rgba(18, 22, 26, 0.14);
+  --hairline-strong: rgba(18, 22, 26, 0.3);
+}
+
+/* ---------- Reset ---------- */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--glass-100);
+  scrollbar-color: var(--glass-400) var(--glass-200);
+  scrollbar-width: thin;
+  caret-color: var(--mark);
+  accent-color: var(--mark);
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--glass-100);
+  color: var(--ink-900);
+  font-family: var(--text-face);
+  font-size: var(--step-0);
+  line-height: 1.62;
+  font-synthesis-weight: none;
+  text-rendering: optimizeLegibility;
+  overflow-x: hidden;
+}
+
+img,
+video {
+  display: block;
+  max-width: 100%;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+h1,
+h2,
+p,
+figure {
+  margin: 0;
+}
+
+::selection {
+  background: var(--mark);
+  color: #fff;
+}
+
+::-webkit-scrollbar {
+  width: 11px;
+  height: 11px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--glass-200);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--glass-400);
+  border: 3px solid var(--glass-200);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--glass-500);
+}
+
+:focus-visible {
+  outline: 2px solid var(--mark);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+/* The edge print: every numeral on the page, with tabular figures, because the
+   point of an edge print is that numerals line up down a strip. */
+.edge {
+  font-family: var(--mono);
+  font-size: var(--step--2);
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  color: var(--ink-400);
+  font-variant-numeric: tabular-nums;
+  text-transform: uppercase;
+}
+
+.shell {
+  width: 100%;
+  max-width: var(--shell);
+  margin-inline: auto;
+  padding-inline: var(--gutter);
+}
+
+/* ---------- The rail ----------
+   The only furniture on the page, built out of the same parts as a month rule:
+   a label, a hairline to the edge, then the counts and two text actions.
+   Deliberately NOT sticky — a bar pinned over the frames is the thing the public
+   site removed last and was right to. */
+
+.rail {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  padding-top: max(var(--gutter), env(safe-area-inset-top));
+  padding-bottom: 0.2rem;
+}
+
+.rail__rule {
+  flex: 1;
+  height: 1px;
+  background: var(--hairline);
+}
+
+.rail__count {
+  white-space: nowrap;
+}
+
+.rail__action {
+  color: var(--ink-400);
+  border-bottom: 1px solid transparent;
+  padding-bottom: 1px;
+  transition: color 0.25s var(--ease-out), border-color 0.25s var(--ease-out);
+}
+
+.rail__action:hover {
+  color: var(--mark-text);
+  border-bottom-color: var(--mark);
+}
+
+/* On a phone the rail is wider than the phone: the counts alone run to 26
+   characters of a deliberately wide mono. The label goes (the page is obviously
+   the library) and what is left is allowed to wrap onto a second line, with the
+   hairline dropping below it — rather than pushing the document sideways. */
+@media (max-width: 559px) {
+  .rail {
+    flex-wrap: wrap;
+    row-gap: 0.35rem;
+    column-gap: 0.9rem;
+  }
+
+  /* The label goes: on a phone the page is obviously the library. */
+  .rail__label {
+    display: none;
+  }
+
+  /* The counts take the first line, then the hairline runs out to meet the two
+     actions on the second — the same construction as a month rule, folded. */
+  .rail__note,
+  .rail__count {
+    order: 1;
+    flex: 1 0 100%;
+    max-width: none;
+  }
+
+  .rail__rule {
+    order: 2;
+  }
+
+  .rail__action {
+    order: 3;
+  }
+}
+
+/* A message from the last publish that failed, in the signal colour. Empty
+   until something goes wrong, so it takes no room. */
+.rail__note {
+  color: var(--mark-text);
+  white-space: nowrap;
+  max-width: 40vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- The stream ---------- */
+
+.stream {
+  padding-top: clamp(0.8rem, 1.6vw, 1.4rem);
+  padding-bottom: clamp(3rem, 6vh, 6rem);
+}
+
+.stream__group + .stream__group {
+  margin-top: clamp(2.4rem, 4vw, 3.6rem);
+}
+
+.stream__month {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin: 0 0 clamp(0.9rem, 1.6vw, 1.3rem);
+  font-family: var(--mono);
+  font-size: var(--step--2);
+  font-weight: 400;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-400);
+}
+
+.stream__monthRule {
+  flex: 1;
+  height: 1px;
+  background: var(--hairline);
+}
+
+/* ---- Justified rows, in CSS ----
+   Only the row breaks are decided in JavaScript. Each frame grows in proportion
+   to its aspect ratio on a zero basis, so widths land proportional to aspect and
+   every height in a row comes out identical — at any container width, with
+   nothing measured. That is what makes a frame uncropped: its box is its own
+   shape, so `object-fit: cover` has nothing to cut off. */
+
+.stream__row {
+  display: flex;
+  gap: var(--gap);
+  margin-bottom: var(--gap);
+}
+
+.stream__row .tile {
+  flex: var(--a) 1 0;
+  aspect-ratio: var(--a);
+}
+
+/* A group's leftover row keeps its natural height instead of being stretched
+   across the page: blowing a single frame up to the full width makes it look
+   like the most important picture of the month, which it is not. */
+.stream__row--last {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.stream__row--last .tile {
+  flex: 0 0 auto;
+  height: var(--last-row-height);
+  width: calc(var(--a) * var(--last-row-height));
+  max-width: 100%;
+  aspect-ratio: auto;
+}
+
+.stream {
+  --last-row-height: 290px;
+}
+
+@media (max-width: 1399px) {
+  .stream {
+    --last-row-height: 250px;
+  }
+}
+
+@media (max-width: 899px) {
+  .stream {
+    --last-row-height: 230px;
+  }
+}
+
+@media (max-width: 559px) {
+  .stream {
+    --last-row-height: 240px;
+  }
+}
+
+/* ---- A frame on the glass ---- */
+
+.tile {
+  position: relative;
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  background-color: var(--glass-300);
+  border-radius: 1px;
+  /* It sits ON the glass rather than being a hole cut in it, which is what
+     stops a photograph reading flat against a light surround. */
+  box-shadow:
+    0 0 0 1px rgba(18, 22, 26, 0.07),
+    0 1px 2px rgba(18, 22, 26, 0.06),
+    0 10px 24px -14px rgba(18, 22, 26, 0.32);
+  transition:
+    transform 0.5s var(--ease-out),
+    box-shadow 0.5s var(--ease-out);
+}
+
+.tile__open {
+  display: block;
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+
+.tile__img {
+  width: 100%;
+  height: 100%;
+  /* The box is already the frame's own aspect ratio, so this crops nothing. */
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity 0.35s var(--ease-out);
+}
+
+.tile__img.is-ready {
+  opacity: 1;
+}
+
+/* Shown when a thumbnail cannot be rendered at all, so the row keeps its
+   rhythm instead of holding a hole. */
+.tile__fallback {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  padding: 0.75rem;
+  text-align: center;
+  color: var(--ink-400);
+}
+
+.tile__fallbackExt {
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  letter-spacing: 0.1em;
+  color: var(--ink-600);
+}
+
+.tile__fallbackName {
+  font-size: var(--step--2);
+  overflow-wrap: anywhere;
+}
+
+/* ---- The chinagraph mark ----
+   A picture editor rings a select in red. The frame lifts and grows a red rule
+   along its bottom edge; nothing else is drawn over the photograph. */
+
+.tile::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: var(--mark);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.45s var(--ease-out);
+  pointer-events: none;
+  z-index: 2;
+}
+
+@media (hover: hover) {
+  .tile:hover {
+    transform: translateY(-3px);
+    box-shadow:
+      0 0 0 1px rgba(18, 22, 26, 0.1),
+      0 3px 6px rgba(18, 22, 26, 0.08),
+      0 20px 38px -18px rgba(18, 22, 26, 0.42);
+  }
+
+  .tile:hover::after {
+    transform: scaleX(1);
+  }
+}
+
+.tile:focus-within::after {
+  transform: scaleX(1);
+}
+
+/* A publish that failed draws the rule and holds it, so the frame that did not
+   go up is the one you are looking at. */
+.tile.is-failed::after {
+  transform: scaleX(1);
+}
+
+.tile__film {
+  position: absolute;
+  left: 0.5rem;
+  bottom: 0.45rem;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.15rem 0.45rem;
+  border-radius: 2px;
+  background: rgba(10, 11, 12, 0.62);
+  color: #fff;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.05em;
+  backdrop-filter: blur(4px);
+}
+
+.tile__filmDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--mark);
+}
+
+/* ---------- The publish toggle ----------
+   One control, bottom right, for one boolean: on means this frame is on
+   media.jasonmcaffee.com, off means it is not. There is no separate badge —
+   an "on" toggle is red and always visible, so the state and the control that
+   changes it are the same object. */
+
+/* The button is the 52x46 touch target, drawn transparent and anchored in the
+   corner; the 34x19 track inside it is the part you see. Padding rather than a
+   negative inset, because the frame clips its own overflow — a target hung
+   outside the tile would be trimmed back under 44px. */
+.pub {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  z-index: 4;
+  width: 52px;
+  height: 46px;
+  padding: 0 8px 8px 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  opacity: 0;
+  transition: opacity 0.28s var(--ease-out);
+}
+
+.pub__track {
+  position: relative;
+  width: 30px;
+  height: 17px;
+  border-radius: 999px;
+  background: rgba(10, 11, 12, 0.5);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3);
+  backdrop-filter: blur(6px);
+  transition:
+    background-color 0.28s var(--ease-out),
+    box-shadow 0.28s var(--ease-out);
+}
+
+/* Positioned with `left` rather than a transform, so `transform` is free for the
+   spinner the knob becomes while a publish is in flight — animating a rotation
+   on top of a translate makes the knob slide backwards as it turns. */
+.pub__knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+  transition: left 0.28s var(--ease-out);
+}
+
+/* A marked frame is not an alarm. Most of this library is published, so a
+   toggle at full strength on every frame is the wall of red the MEDIA badge
+   already was; it holds back until the frame is pointed at. */
+.pub[aria-checked='true'] {
+  opacity: 0.82;
+}
+
+.pub[aria-checked='true'] .pub__track {
+  background: var(--mark);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.28);
+}
+
+.pub[aria-checked='true'] .pub__knob {
+  left: 15px;
+}
+
+/* Off and unpointed-at, the toggle is not there at all — a library of two and a
+   half thousand frames should not be a wall of switches. */
+@media (hover: hover) {
+  .tile:hover .pub,
+  .tile:hover .pub[aria-checked='true'],
+  .pub:focus-visible {
+    opacity: 1;
+  }
+}
+
+/* A phone has no pointer to hover with, so an off toggle stays faintly present
+   rather than being unreachable. */
+@media (hover: none), (pointer: coarse) {
+  .pub {
+    opacity: 0.6;
+  }
+}
+
+.pub.is-working {
+  opacity: 1;
+  pointer-events: none;
+}
+
+.pub.is-working .pub__track {
+  background: rgba(10, 11, 12, 0.62);
+}
+
+/* The knob becomes the spinner, in place, so the toggle does not appear to have
+   already moved before the server has agreed that it has. */
+.pub.is-working .pub__knob {
+  background: transparent;
+  box-shadow: none;
+  border: 2px solid rgba(255, 255, 255, 0.32);
+  border-top-color: #fff;
+  animation: pub-spin 0.7s linear infinite;
+}
+
+@keyframes pub-spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tile,
+  .tile::after,
+  .pub,
+  .pub__track,
+  .pub__knob,
+  .tile__img {
+    transition: none;
+  }
+
+  .pub.is-working .pub__knob {
+    animation-duration: 2.4s;
+  }
+}
+
+/* ---------- Paging ---------- */
+
+.stream__foot {
+  min-height: 4.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.9rem;
+  padding-top: clamp(1.5rem, 3vw, 2.5rem);
+  color: var(--ink-400);
+}
+
+.stream__endRule {
+  height: 1px;
+  background: var(--hairline);
+  flex: 1;
+  max-width: 12rem;
+}
+
+.stream__retry {
+  border: 1px solid var(--hairline-strong);
+  border-radius: 999px;
+  padding: 0.35rem 0.95rem;
+  font-size: var(--step--1);
+  color: var(--mark-text);
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  transition:
+    border-color 0.25s var(--ease-out),
+    background-color 0.25s var(--ease-out);
+}
+
+.stream__retry:hover {
+  border-color: var(--mark);
+  background: rgba(224, 48, 28, 0.08);
+}
+
+.stream__spinner {
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid var(--hairline-strong);
+  border-top-color: var(--mark);
+  border-radius: 50%;
+  animation: pub-spin 0.8s linear infinite;
+}
+
+.stream__empty {
+  padding: clamp(4rem, 12vw, 8rem) 0;
+  color: var(--ink-400);
+  text-align: center;
+}
+
+#sentinel {
+  height: 1px;
+}
+
+/* ---------- The detail view ----------
+   One frame, as large as the screen allows, against black. Everything that is
+   not the photograph is deliberately quiet: a small close mark and one line of
+   edge print. There are no on-screen arrows — navigation is a swipe or an arrow
+   key, because arrows sat over the picture at every width. */
+
+.detail {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: none;
+  align-items: center;
+  justify-content: center;
+}
+
+.detail.is-open {
+  display: flex;
+  animation: detail-in 0.35s var(--ease-out);
+}
+
+@keyframes detail-in {
+  from {
+    opacity: 0;
+  }
+}
+
+.detail__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(4, 5, 6, 0.96);
+  backdrop-filter: blur(16px);
+}
+
+.detail__panel {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.55rem;
+  width: min(100% - 1.5rem, 1800px);
+  max-height: 100svh;
+  padding-block: 0.75rem;
+}
+
+.detail__panel:focus {
+  outline: none;
+}
+
+.detail__stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  flex: 1;
+  width: 100%;
+}
+
+.detail__stage img,
+.detail__stage video {
+  max-width: 100%;
+  /* As big as the screen allows; only the one line of edge print is reserved. */
+  max-height: calc(100svh - 3.25rem);
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  box-shadow: 0 30px 90px -30px rgba(0, 0, 0, 0.9);
+}
+
+.detail__stage img {
+  animation: detail-settle 0.5s var(--ease-out);
+}
+
+@keyframes detail-settle {
+  from {
+    opacity: 0;
+    transform: scale(1.015);
+  }
+}
+
+/* One quiet line: date, size, dimensions, position. Deliberately the dimmest
+   type here — it is a caption on a print, not what you came for. */
+.detail__edge {
+  display: flex;
+  gap: 1.1rem;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: baseline;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  font-variant-numeric: tabular-nums;
+  color: rgba(236, 238, 240, 0.42);
+  flex-shrink: 0;
+}
+
+.detail__count {
+  color: rgba(236, 238, 240, 0.28);
+}
+
+.detail__close {
+  position: absolute;
+  z-index: 2;
+  top: 0.85rem;
+  right: 0.85rem;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: rgba(236, 238, 240, 0.55);
+  background: rgba(255, 255, 255, 0.06);
+  transition:
+    color 0.25s var(--ease-out),
+    background-color 0.25s var(--ease-out);
+}
+
+.detail__close:hover {
+  color: var(--bone);
+  background: rgba(255, 255, 255, 0.16);
+}
+
+/* A 30px mark is smaller than a thumb, so its target is padded out around it. */
+.detail__close::before {
+  content: '';
+  position: absolute;
+  inset: -8px;
+}
+
+/* Shown when neither the rendition nor the original can be displayed here. */
+.detail__note {
+  color: var(--smoke);
+  text-align: center;
+  max-width: 46ch;
+  line-height: 1.7;
+  padding: 1.5rem;
+}
+
+.detail__note strong {
+  color: var(--bone);
+  font-weight: 500;
+}
+
+.detail__note a {
+  color: #ff6a55;
+}
+
+.detail__why {
+  display: block;
+  margin-top: 0.7rem;
+  font-size: var(--step--1);
+  color: var(--smoke-dim);
+}
+
+@media (max-width: 680px) {
+  .detail__panel {
+    width: 100%;
+    padding-block: 0.5rem;
+  }
+
+  .detail__stage img,
+  .detail__stage video {
+    max-height: calc(100svh - 3rem);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .detail.is-open,
+  .detail__stage img {
+    animation: none;
+  }
+}
+
+/* ---------- Sign in ---------- */
+
+.login {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--glass-100);
+}
+
+.login__card {
+  width: min(340px, 88vw);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.login__title {
+  font-family: var(--display);
+  font-weight: 500;
+  font-size: 1.35rem;
+  letter-spacing: -0.01em;
+  margin-bottom: 0.1rem;
+}
+
+.login__lede {
+  color: var(--ink-400);
+  font-size: var(--step--1);
+  margin-bottom: 0.6rem;
+}
+
+.login__field {
+  font: inherit;
+  font-size: var(--step--1);
+  color: var(--ink-900);
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--hairline-strong);
+  border-radius: 0;
+  padding: 0.55rem 0.1rem;
+  transition: border-color 0.25s var(--ease-out);
+}
+
+.login__field::placeholder {
+  color: var(--ink-400);
+}
+
+.login__field:focus {
+  outline: none;
+  border-bottom-color: var(--mark);
+}
+
+.login__submit {
+  align-self: flex-start;
+  margin-top: 0.7rem;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 999px;
+  padding: 0.4rem 1.3rem;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: var(--step--2);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  transition:
+    border-color 0.25s var(--ease-out),
+    color 0.25s var(--ease-out),
+    background-color 0.25s var(--ease-out);
+}
+
+.login__submit:hover {
+  border-color: var(--mark);
+  color: var(--mark-text);
+  background: rgba(224, 48, 28, 0.06);
+}
+
+.login__err {
+  color: var(--mark-text);
+  font-size: var(--step--1);
+  min-height: 1.4em;
+}
